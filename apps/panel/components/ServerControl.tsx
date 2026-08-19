@@ -8,47 +8,21 @@ const clamp=(n:number,min=0,max=100)=>Math.min(max,Math.max(min,Number.isFinite(
 
 export default function ServerControl({id,mode='overview'}:{id:string;mode?:string}){
   const [s,setS]=useState<Status>({status:'checking',cpu:0,memory:0,memoryLimit:8192,uptime:'-'});
-  const [lines,setLines]=useState<string[]>(['[CrakHost] Connecting to CrakNode...']);
-  const [busy,setBusy]=useState('');
-  const [cmd,setCmd]=useState('');
-  const [cpuHistory,setCpuHistory]=useState<number[]>(Array(GRAPH_POINTS).fill(0));
-  const [memHistory,setMemHistory]=useState<number[]>(Array(GRAPH_POINTS).fill(0));
+  const [lines,setLines]=useState<string[]>(['[CrakHost] Connecting to live console stream...']);
+  const [streamState,setStreamState]=useState<'connecting'|'live'|'retrying'>('connecting');
+  const [busy,setBusy]=useState('');const [cmd,setCmd]=useState('');
+  const [cpuHistory,setCpuHistory]=useState<number[]>(Array(GRAPH_POINTS).fill(0));const [memHistory,setMemHistory]=useState<number[]>(Array(GRAPH_POINTS).fill(0));
   const consoleRef=useRef<HTMLDivElement>(null);
-
-  const refresh=useCallback(async()=>{
-    try{
-      const [a,b]=await Promise.all([fetch(`/api/servers/${id}/status`,{cache:'no-store'}),fetch(`/api/servers/${id}/logs`,{cache:'no-store'})]);
-      const stat=await a.json();setS(stat);
-      const cpu=clamp(Number(stat.cpu||0));const mem=clamp(((Number(stat.memory)||0)/(Number(stat.memoryLimit)||8192))*100);
-      setCpuHistory(h=>[...h.slice(-(GRAPH_POINTS-1)),cpu]);setMemHistory(h=>[...h.slice(-(GRAPH_POINTS-1)),mem]);
-      const l=await b.json();if(Array.isArray(l.lines))setLines(l.lines.map((x:unknown)=>String(x)));
-    }catch{setS(x=>({...x,status:'node_offline'}))}
-  },[id]);
-
+  const refresh=useCallback(async()=>{try{const a=await fetch(`/api/servers/${id}/status`,{cache:'no-store'});const stat=await a.json();setS(stat);const cpu=clamp(Number(stat.cpu||0));const mem=clamp(((Number(stat.memory)||0)/(Number(stat.memoryLimit)||8192))*100);setCpuHistory(h=>[...h.slice(-(GRAPH_POINTS-1)),cpu]);setMemHistory(h=>[...h.slice(-(GRAPH_POINTS-1)),mem])}catch{setS(x=>({...x,status:'node_offline'}))}},[id]);
   useEffect(()=>{refresh();const t=setInterval(refresh,2500);return()=>clearInterval(t)},[refresh]);
+  useEffect(()=>{const es=new EventSource(`/api/servers/${id}/stream`);const onReady=()=>setStreamState('live');const onLogs=(ev:MessageEvent)=>{try{const d=JSON.parse(ev.data);if(Array.isArray(d.lines)){setLines(d.lines.map((x:unknown)=>String(x)));setStreamState('live')}}catch{}};const onNodeError=(ev:MessageEvent)=>{try{const d=JSON.parse(ev.data);setLines(x=>[...x.slice(-179),`[CrakHost] ${d.error||'Node stream error'}`])}catch{}setStreamState('retrying')};es.addEventListener('ready',onReady as EventListener);es.addEventListener('logs',onLogs as EventListener);es.addEventListener('node-error',onNodeError as EventListener);es.onerror=()=>setStreamState('retrying');return()=>es.close()},[id]);
   useEffect(()=>{consoleRef.current?.scrollTo({top:consoleRef.current.scrollHeight})},[lines]);
-
   async function action(a:string){setBusy(a);try{const r=await fetch(`/api/servers/${id}/action`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:a})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Action failed');await refresh()}catch(e:any){setLines(x=>[...x,`[CrakHost] ${e.message}`])}finally{setBusy('')}}
-  async function send(){const c=cmd.trim();if(!c||s.status!=='running')return;setCmd('');setLines(x=>[...x,`> ${c}`]);try{const r=await fetch(`/api/servers/${id}/command`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({command:c})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Command failed');if(d.output)setLines(x=>[...x,String(d.output)])}catch(e:any){setLines(x=>[...x,`[CrakHost] ${e.message}`])}setTimeout(refresh,500)}
-
-  const running=s.status==='running';const offline=s.status==='offline'||s.status==='exited'||s.status==='created';
-  const memPct=clamp(((s.memory||0)/(s.memoryLimit||8192))*100);const cpuPct=clamp(Number(s.cpu||0));
-  const consolePanel=<div className="card consoleCard v17Console"><div className="consoleTitle"><div><Terminal size={15}/><b>Live Console</b></div><span><i className={running?'liveDot':'liveDot off'}/>{running?'STREAMING':'WAITING'}</span></div><div className="console" ref={consoleRef}>{lines.slice(-180).map((l,i)=><div key={i} className={l.includes('Done')||l.includes('CrakHost')?'ok':l.startsWith('>')?'accent':''}>{l}</div>)}</div><div className="consoleInput"><span>&gt;</span><input value={cmd} disabled={!running} onChange={e=>setCmd(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder={running?'Type a command...':'Start the server to use console'}/><button className="btn indigo" disabled={!running||!cmd.trim()} onClick={send}>Send</button></div></div>;
-
+  async function send(){const c=cmd.trim();if(!c||s.status!=='running')return;setCmd('');setLines(x=>[...x,`> ${c}`]);try{const r=await fetch(`/api/servers/${id}/command`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({command:c})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Command failed');if(d.output)setLines(x=>[...x,String(d.output)])}catch(e:any){setLines(x=>[...x,`[CrakHost] ${e.message}`])}}
+  const running=s.status==='running';const offline=s.status==='offline'||s.status==='exited'||s.status==='created';const memPct=clamp(((s.memory||0)/(s.memoryLimit||8192))*100);const cpuPct=clamp(Number(s.cpu||0));
+  const consolePanel=<div className="card consoleCard v17Console"><div className="consoleTitle"><div><Terminal size={15}/><b>Live Console</b></div><span><i className={streamState==='live'?'liveDot':'liveDot off'}/>{streamState==='live'?'SSE LIVE':streamState==='retrying'?'RECONNECTING':'CONNECTING'}</span></div><div className="console" ref={consoleRef}>{lines.slice(-180).map((l,i)=><div key={i} className={l.includes('Done')||l.includes('CrakHost')?'ok':l.startsWith('>')?'accent':''}>{l}</div>)}</div><div className="consoleInput"><span>&gt;</span><input value={cmd} disabled={!running} onChange={e=>setCmd(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder={running?'Type a command...':'Start the server to use console'}/><button className="btn indigo" disabled={!running||!cmd.trim()} onClick={send}>Send</button></div></div>;
   if(mode==='console')return <><div className="powerBar"><div><span className={`runtimeBadge ${running?'onlineState':'offlineState'}`}>{s.status||'unknown'}</span><small>CrakNode protected runtime</small></div><div className="actions"><button className="btn green" onClick={()=>action('start')} disabled={!!busy||running}><Play size={14}/>START</button><button className="btn orange" onClick={()=>action('restart')} disabled={!!busy||!running}><RotateCw size={14}/>RESTART</button><button className="btn rose" onClick={()=>action('stop')} disabled={!!busy||offline}><Square size={14}/>STOP</button><button className="btn" onClick={refresh}><RefreshCw size={14}/></button></div></div>{consolePanel}</>;
-
-  return <>
-    <div className="powerBar"><div><span className={`runtimeBadge ${running?'onlineState':s.status==='node_offline'?'offlineState':''}`}>{s.status||'unknown'}</span><small>{s.health||'CrakNode secure connection'}</small></div><div className="actions"><button className="btn green" onClick={()=>action('start')} disabled={!!busy||running}><Play size={14}/>START</button><button className="btn orange" onClick={()=>action('restart')} disabled={!!busy||!running}><RotateCw size={14}/>RESTART</button><button className="btn rose" onClick={()=>action('stop')} disabled={!!busy||offline}><Square size={14}/>STOP</button><button className="btn" onClick={refresh}><RefreshCw size={14}/></button></div></div>
-    <div className="grid4 runtimeGrid v17Metrics">
-      <Runtime icon={<Cpu size={16}/>} label="CPU" value={`${cpuPct.toFixed(1)}%`} pct={cpuPct}/>
-      <Runtime icon={<MemoryStick size={16}/>} label="Memory" value={`${formatMb(s.memory||0)} / ${formatMb(s.memoryLimit||8192)}`} pct={memPct} kind="purple"/>
-      <Runtime icon={<ShieldCheck size={16}/>} label="Node" value={s.status==='node_offline'?'Offline':'Connected'} pct={s.status==='node_offline'?0:100} kind="green"/>
-      <Runtime icon={<Clock size={16}/>} label="Uptime" value={cleanUptime(s.uptime)} pct={running?100:0}/>
-    </div>
-    <section className="section twoCol serverMonitorGrid"><div className="card graphCard"><div className="sectionTitle graphTitle"><span>Live Resource History</span><span className="graphLegend"><b>CPU</b><b>RAM</b></span></div><div className="chart">{cpuHistory.map((h,i)=><div className="chartColumn" key={i}><i className="cpuBar" style={{height:`${clamp(h)}%`}}/><i className="memBar" style={{height:`${clamp(memHistory[i]||0)}%`}}/></div>)}</div></div>{consolePanel}</section>
-  </>
-}
-
+  return <><div className="powerBar"><div><span className={`runtimeBadge ${running?'onlineState':s.status==='node_offline'?'offlineState':''}`}>{s.status||'unknown'}</span><small>{s.health||'CrakNode secure connection'}</small></div><div className="actions"><button className="btn green" onClick={()=>action('start')} disabled={!!busy||running}><Play size={14}/>START</button><button className="btn orange" onClick={()=>action('restart')} disabled={!!busy||!running}><RotateCw size={14}/>RESTART</button><button className="btn rose" onClick={()=>action('stop')} disabled={!!busy||offline}><Square size={14}/>STOP</button><button className="btn" onClick={refresh}><RefreshCw size={14}/></button></div></div><div className="grid4 runtimeGrid v17Metrics"><Runtime icon={<Cpu size={16}/>} label="CPU" value={`${cpuPct.toFixed(1)}%`} pct={cpuPct}/><Runtime icon={<MemoryStick size={16}/>} label="Memory" value={`${formatMb(s.memory||0)} / ${formatMb(s.memoryLimit||8192)}`} pct={memPct} kind="purple"/><Runtime icon={<ShieldCheck size={16}/>} label="Node" value={s.status==='node_offline'?'Offline':'Connected'} pct={s.status==='node_offline'?0:100} kind="green"/><Runtime icon={<Clock size={16}/>} label="Uptime" value={cleanUptime(s.uptime)} pct={running?100:0}/></div><section className="section twoCol serverMonitorGrid"><div className="card graphCard"><div className="sectionTitle graphTitle"><span>Live Resource History</span><span className="graphLegend"><b>CPU</b><b>RAM</b></span></div><div className="chart">{cpuHistory.map((h,i)=><div className="chartColumn" key={i}><i className="cpuBar" style={{height:`${clamp(h)}%`}}/><i className="memBar" style={{height:`${clamp(memHistory[i]||0)}%`}}/></div>)}</div></div>{consolePanel}</section></>}
 function Runtime({icon,label,value,pct,kind}:{icon:React.ReactNode,label:string,value:string,pct:number,kind?:string}){return <div className="card v17Metric"><div className="metricTop"><span>{label}</span>{icon}</div><div className="metricValue" style={{fontSize:22}}>{value}</div><div className={`progress ${kind||''}`}><span style={{width:`${clamp(pct)}%`}}/></div></div>}
 function formatMb(v:number){return v>=1024?`${(v/1024).toFixed(1)} GB`:`${Math.round(v)} MB`}
 function cleanUptime(v?:string){if(!v||v.includes('â')||v==='—')return '-';return v}
