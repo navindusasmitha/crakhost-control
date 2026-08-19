@@ -23,6 +23,6 @@ export default async function Sidebar(){
       <Link href="/security"><LockKeyhole size={17}/>Security</Link>
       {staff&&<><div className="navTitle">ADMINISTRATION</div><Link href="/admin"><Shield size={17}/>Admin Center</Link><Link href="/nodes"><Boxes size={17}/>Nodes</Link><Link href="/admin"><Users size={17}/>Customers</Link><Link href="/developer"><Code2 size={17}/>Developer</Link><Link href="/operations"><ActivitySquare size={17}/>Operations</Link><Link href="/infrastructure"><Network size={17}/>Infrastructure</Link><Link href="/deployment"><Rocket size={17}/>Deployment</Link></>}
     </nav>
-    <div className="sidebarBottom"><div className="online"><span className="pulse"/>All systems operational · v0.17</div></div>
+    <div className="sidebarBottom"><div className="online"><span className="pulse"/>All systems operational · v0.23</div></div>
   </aside>
 }
