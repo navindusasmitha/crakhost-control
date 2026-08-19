@@ -30,13 +30,21 @@ services:
       CRAKNODE_TOKEN: ${CRAKNODE_TOKEN:-change-this-node-token}
       CRAKNODE_SERVER_CONTAINER: crakhost-minecraft-production
       CRAKNODE_BACKUP_DIR: /backups
+      CRAKNODE_TRANSFER_LISTEN: :8089
+      CRAKNODE_TRANSFER_MAX_MB: ${CRAKNODE_TRANSFER_MAX_MB:-512}
       CRAKNODE_DNS_PRIMARY: ${DOCKER_DNS_1:-1.1.1.1}
       CRAKNODE_DNS_SECONDARY: ${DOCKER_DNS_2:-8.8.8.8}
     volumes:
       - ./services/craknode:/app:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - craknode_backups:/backups
-    command: sh -c "apk add --no-cache docker-cli >/dev/null && go run ."
+    command: sh -c "apk add --no-cache docker-cli wget >/dev/null && go run ."
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --header='Authorization: Bearer '$$CRAKNODE_TOKEN http://127.0.0.1:8089/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 25s
     networks: [crakhost]
 
   minecraft-demo:
