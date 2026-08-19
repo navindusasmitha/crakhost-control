@@ -1,0 +1,44 @@
+import {NextRequest,NextResponse} from 'next/server';
+import {getCurrentUser} from '@/lib/auth';
+import {db} from '@/lib/db';
+import {provisionServer} from '@/lib/provision';
+import {randomBytes} from 'node:crypto';
+
+export async function POST(req:NextRequest){
+  const user=await getCurrentUser();if(!user)return NextResponse.json({error:'Sign in required'},{status:401});
+  const body=await req.json();const slug=String(body.plan||'');const serverName=String(body.serverName||'My Server').trim().slice(0,120);
+  const pq=await db.query('select * from plans where slug=$1 and enabled=true limit 1',[slug]);const plan=pq.rows[0];
+  if(!plan)return NextResponse.json({error:'Plan not found'},{status:404});
+  const price=Number(plan.price_monthly);const credits=Number(user.credits||0);const orderId=randomBytes(16).toString('hex');
+  if(credits<price){
+    const oq=await db.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,metadata) values($1,$2,'PENDING',$3,$4,$5,$6,'wallet',$7::jsonb) returning id`,[user.id,plan.id,price,plan.currency,plan.template_slug||'minecraft',serverName,JSON.stringify({reason:'INSUFFICIENT_WALLET'})]);
+    const number=`INV-${Date.now().toString(36).toUpperCase()}-${String(oq.rows[0].id).slice(0,6).toUpperCase()}`;
+    await db.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,description) values($1,$2,$3,$4,$5,'DUE',now()+interval '1 day',$6)`,[user.id,oq.rows[0].id,number,price,plan.currency,`${plan.name} - ${serverName}`]);
+    return NextResponse.json({error:`Wallet balance is ${plan.currency} ${credits.toFixed(2)}. ${plan.currency} ${price.toFixed(2)} is required. Order created as pending.`,orderId:oq.rows[0].id,required:price,balance:credits},{status:402});
+  }
+
+  const client=await db.connect();let order:any;
+  try{
+    await client.query('begin');
+    const locked=await client.query('select credits from users where id=$1 for update',[user.id]);if(Number(locked.rows[0].credits)<price)throw new Error('Wallet balance changed; retry checkout');
+    const oq=await client.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,paid_at,metadata) values($1,$2,'PAID',$3,$4,$5,$6,'wallet',now(),$7::jsonb) returning *`,[user.id,plan.id,price,plan.currency,plan.template_slug||'minecraft',serverName,JSON.stringify({checkout:'storefront'})]);order=oq.rows[0];
+    await client.query('update users set credits=credits-$2 where id=$1',[user.id,price]);
+    await client.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'DEBIT',$3,'order',$4)`,[user.id,-price,`${plan.name} purchase`,order.id]);
+    const number=`INV-${Date.now().toString(36).toUpperCase()}-${String(order.id).slice(0,6).toUpperCase()}`;
+    await client.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,paid_at,description) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6)`,[user.id,order.id,number,price,plan.currency,`${plan.name} - ${serverName}`]);
+    await client.query('commit');
+  }catch(e:any){await client.query('rollback');client.release();return NextResponse.json({error:e.message||'Checkout failed'},{status:409})}
+  client.release();
+
+  try{
+    await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1",[order.id]);
+    const server=await provisionServer({ownerId:user.id,name:serverName,templateSlug:plan.template_slug||'minecraft',memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),planId:plan.id});
+    await db.query("update orders set status='ACTIVE',server_id=$2,provisioned_at=now(),updated_at=now() where id=$1",[order.id,server.id]);
+    await db.query("insert into notifications(user_id,title,body,kind) values($1,'Server ready',$2,'success')",[user.id,`${serverName} has been provisioned on ${server.node_name}.`]);
+    return NextResponse.json({ok:true,orderId:order.id,identifier:server.identifier},{status:201});
+  }catch(e:any){
+    const msg=String(e?.message||e).slice(0,700);
+    const c=await db.connect();try{await c.query('begin');await c.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);await c.query('update users set credits=credits+$2 where id=$1',[user.id,price]);await c.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'REFUND',$3,'order',$4)`,[user.id,price,`Automatic refund: ${plan.name} provisioning failed`,order.id]);await c.query('commit')}catch{await c.query('rollback')}finally{c.release()}
+    return NextResponse.json({error:`Provisioning failed and wallet was refunded: ${msg}`,orderId:order.id},{status:502});
+  }
+}
