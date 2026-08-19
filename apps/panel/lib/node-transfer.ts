@@ -1,0 +1,3 @@
+import {db} from './db';
+function transferBase(base:string){try{const u=new URL(base);u.port=process.env.CRAKNODE_TRANSFER_PORT||'8089';return u.toString().replace(/\/$/,'')}catch{return base.replace(/:8088\/?$/,':8089').replace(/\/$/,'')}}
+export async function nodeTransferForServer(identifier:string,path:string,init:RequestInit={}){const {rows}=await db.query(`select n.base_url,n.api_token from servers s left join nodes n on n.id=s.node_id where s.identifier=$1 limit 1`,[identifier]);const n=rows[0]||{};const base=transferBase(n.base_url||process.env.CRAKNODE_URL||'http://localhost:8088');const token=n.api_token||process.env.CRAKNODE_TOKEN||'';return fetch(base+path,{...init,headers:{authorization:`Bearer ${token}`,...(init.headers||{})},cache:'no-store'})}
