@@ -1,0 +1,1 @@
+import DeveloperCenter from '../../../components/DeveloperCenter';export default function Developer(){return <><div className="pageHead"><div><p>INTEGRATIONS</p><h1>Developer</h1><p>API keys, webhook endpoints and automation access.</p></div></div><section className="section"><DeveloperCenter/></section></>}

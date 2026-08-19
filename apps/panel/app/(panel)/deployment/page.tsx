@@ -1,0 +1,1 @@
+import DeploymentCenter from '@/components/DeploymentCenter';export default function Page(){return <DeploymentCenter/>}

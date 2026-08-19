@@ -1,0 +1,1 @@
+import InfrastructureCenter from '@/components/InfrastructureCenter';export default function Page(){return <InfrastructureCenter/>}

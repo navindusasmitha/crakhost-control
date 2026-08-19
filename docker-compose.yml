@@ -1,0 +1,70 @@
+name: crakhost-control-v011
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: crakhost
+      POSTGRES_USER: crakhost
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-now}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crakhost -d crakhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["6379:6379"]
+
+  craknode:
+    image: golang:1.23-alpine
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      CRAKNODE_TOKEN: ${CRAKNODE_TOKEN:-change-this-node-token}
+      CRAKNODE_SERVER_CONTAINER: crakhost-minecraft-production
+      CRAKNODE_BACKUP_DIR: /backups
+      CRAKNODE_DNS_PRIMARY: ${DOCKER_DNS_1:-1.1.1.1}
+      CRAKNODE_DNS_SECONDARY: ${DOCKER_DNS_2:-8.8.8.8}
+    volumes:
+      - ./services/craknode:/app:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - craknode_backups:/backups
+    command: sh -c "apk add --no-cache docker-cli >/dev/null && go run ."
+    ports: ["8088:8088"]
+
+  minecraft-demo:
+    image: itzg/minecraft-server:latest
+    profiles: ["demo-game"]
+    container_name: crakhost-minecraft-production
+    environment:
+      EULA: "TRUE"
+      MEMORY: "2G"
+      ENABLE_RCON: "TRUE"
+    ports: ["25565:25565"]
+    dns:
+      - ${DOCKER_DNS_1:-1.1.1.1}
+      - ${DOCKER_DNS_2:-8.8.8.8}
+    cpus: 2.0
+    mem_limit: 2g
+    volumes:
+      - minecraft_data:/data
+    restart: unless-stopped
+
+volumes:
+  # v0.5 intentionally reuses the v0.4 named volumes so upgrades keep local data.
+  pgdata:
+    external: true
+    name: ${CRAKHOST_PGDATA_VOLUME:-crakhost-control-v04_pgdata}
+  minecraft_data:
+    external: true
+    name: ${CRAKHOST_MINECRAFT_VOLUME:-crakhost-control-v04_minecraft_data}
+  craknode_backups:
+    external: true
+    name: ${CRAKHOST_BACKUPS_VOLUME:-crakhost-control-v04_craknode_backups}

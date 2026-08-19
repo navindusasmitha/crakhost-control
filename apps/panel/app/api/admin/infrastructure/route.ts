@@ -1,0 +1,4 @@
+import{NextResponse}from'next/server';import{getCurrentUser,isStaff}from'@/lib/auth';import{db}from'@/lib/db';
+export async function GET(){const u=await getCurrentUser();if(!isStaff(u))return NextResponse.json({error:'Forbidden'},{status:403});
+ const [n,h,m]=await Promise.all([db.query(`select id,name,location,enabled,capacity_cpu,capacity_memory_mb,capacity_disk_mb,last_seen_at,agent_version from nodes order by name`),db.query(`select id,name,engine,host,port,enabled from database_hosts order by name`),db.query(`select sm.id,sm.status,sm.progress,sm.created_at,s.name server_name from server_migrations sm join servers s on s.id=sm.server_id order by sm.created_at desc limit 20`)]);
+ return NextResponse.json({nodes:n.rows,dbHosts:h.rows,migrations:m.rows});}

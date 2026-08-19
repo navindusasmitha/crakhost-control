@@ -1,0 +1,1 @@
+import {NextResponse} from 'next/server';import {getCurrentUser} from '@/lib/auth';import {db} from '@/lib/db';export async function GET(){if(!await getCurrentUser())return NextResponse.json({error:'Unauthorized'},{status:401});const {rows}=await db.query('select * from plans where enabled=true order by price_monthly');return NextResponse.json({plans:rows})}

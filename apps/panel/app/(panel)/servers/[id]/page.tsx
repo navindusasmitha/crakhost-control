@@ -1,0 +1,2 @@
+import ServerWorkspace from '../../../../components/ServerWorkspace';
+export default async function ServerPage({params}:{params:Promise<{id:string}>}){const {id}=await params;return <><div className="pageHead"><div><p>Servers / {id}</p><h1>{id==='minecraft-production'?'Minecraft Production':id}</h1><p>CrakNode managed server · protected container runtime</p></div></div><ServerWorkspace id={id}/></>}

@@ -1,0 +1,4 @@
+import {NextRequest,NextResponse} from 'next/server';import {getCurrentUser} from '@/lib/auth';import {db} from '@/lib/db';
+async function admin(){const u=await getCurrentUser();return u?.role==='ADMIN'}
+export async function GET(){if(!await admin())return NextResponse.json({error:'Forbidden'},{status:403});const {rows}=await db.query('select id,name,email,role,credits,created_at from users order by created_at desc limit 100');return NextResponse.json({users:rows})}
+export async function PATCH(req:NextRequest){if(!await admin())return NextResponse.json({error:'Forbidden'},{status:403});const {id,role,credits}=await req.json();if(!['USER','ADMIN','SUPPORT','RESELLER'].includes(role))return NextResponse.json({error:'Invalid role'},{status:400});await db.query('update users set role=$2,credits=$3 where id=$1',[id,role,Number(credits)||0]);return NextResponse.json({ok:true})}

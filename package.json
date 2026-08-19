@@ -1,0 +1,15 @@
+{
+  "name": "crakhost-control",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace apps/panel run dev",
+    "build": "npm --workspace apps/panel run build",
+    "start": "npm --workspace apps/panel run start",
+    "worker": "npm --workspace apps/worker run start"
+  },
+  "version": "0.11.0"
+}

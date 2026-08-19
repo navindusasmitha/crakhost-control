@@ -1,0 +1,1 @@
+export async function GET(){return Response.json({platform:'CrakHost Control',version:'0.3.0',status:'online',nodes:[{id:'LK-MNL-01',online:true,cpu:41,ram:62},{id:'SG-SIN-01',online:true,cpu:27,ram:44},{id:'SG-SIN-02',online:true,cpu:53,ram:71}]})}

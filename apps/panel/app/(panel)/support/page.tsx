@@ -1,0 +1,1 @@
+import SupportCenter from '../../../components/SupportCenter';export default function Support(){return <><div className="pageHead"><div><p>CUSTOMER CARE</p><h1>Support Center</h1><p>Open tickets, reply to staff and track issue status.</p></div></div><section className="section"><SupportCenter/></section></>}

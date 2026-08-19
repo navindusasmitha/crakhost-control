@@ -1,0 +1,16 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: zip -r "crakhost-control-${GITHUB_REF_NAME}.zip" . -x ".git/*"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: crakhost-control-${{ github.ref_name }}.zip
+          generate_release_notes: true

@@ -1,0 +1,1 @@
+import CreateServerWizard from '../../../../components/CreateServerWizard';export default function CreateServer(){return <><div className="pageHead"><div><p>DEPLOYMENT CENTER</p><h1>Create Server</h1><p>Provision a protected Docker workload on CrakNode.</p></div></div><CreateServerWizard/></>}
