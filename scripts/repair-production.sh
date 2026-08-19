@@ -6,29 +6,45 @@ cd "${CRAKHOST_DIR:-/opt/crakhost}"
 set -a; . ./.env; set +a
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.production.yml)
 
+# Remove the old demo runtime that can silently keep 25565 occupied.
+if docker ps -aq --filter 'name=^/crakhost-minecraft-production$' | grep -q .; then
+  echo "Removing legacy demo Minecraft container (volume is preserved)..."
+  docker rm -f crakhost-minecraft-production >/dev/null || true
+fi
+
 # Ensure core services are up first.
 "${COMPOSE[@]}" up -d postgres redis craknode panel
 
-for i in $(seq 1 30); do
-  "${COMPOSE[@]}" exec -T postgres pg_isready -U crakhost -d crakhost >/dev/null 2>&1 && break
+READY=0
+for i in $(seq 1 40); do
+  if "${COMPOSE[@]}" exec -T postgres pg_isready -U crakhost -d crakhost >/dev/null 2>&1; then READY=1; break; fi
   sleep 2
 done
+[ "$READY" -eq 1 ] || { "${COMPOSE[@]}" logs postgres --tail=100; exit 1; }
 
-# Remove legacy dev/demo DB rows.
 cat database/migrations/v0.14.sql | "${COMPOSE[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U crakhost -d crakhost
 
 NODE_NAME="$(hostname -s | tr -cd '[:alnum:]._-')"
 [ -n "$NODE_NAME" ] || NODE_NAME="CRAKHOST-VPS-01"
 NODE_LOCATION="${CRAKHOST_NODE_LOCATION:-VPS}"
 NODE_TOKEN="${CRAKNODE_TOKEN:?CRAKNODE_TOKEN missing from .env}"
+NODE_CPU="$(nproc 2>/dev/null || echo 1)"
+NODE_MEMORY_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 1024)"
+NODE_DISK_MB="$(df -Pm / | awk 'NR==2 {print $2}')"
 
 "${COMPOSE[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U crakhost -d crakhost \
   -v node_name="$NODE_NAME" -v node_location="$NODE_LOCATION" -v node_token="$NODE_TOKEN" \
-  -c "INSERT INTO nodes(name,location,base_url,enabled,api_token,last_seen_at,agent_version) VALUES (:'node_name',:'node_location','http://craknode:8088',true,:'node_token',now(),'0.14.0') ON CONFLICT(name) DO UPDATE SET location=excluded.location,base_url=excluded.base_url,enabled=true,api_token=excluded.api_token,last_seen_at=now(),agent_version=excluded.agent_version;"
+  -v node_cpu="$NODE_CPU" -v node_memory="$NODE_MEMORY_MB" -v node_disk="$NODE_DISK_MB" \
+  -c "INSERT INTO nodes(name,location,base_url,enabled,api_token,last_seen_at,agent_version,capacity_cpu,capacity_memory_mb,capacity_disk_mb) VALUES (:'node_name',:'node_location','http://craknode:8088',true,:'node_token',now(),'0.14.0',:'node_cpu',:'node_memory',:'node_disk') ON CONFLICT(name) DO UPDATE SET location=excluded.location,base_url=excluded.base_url,enabled=true,api_token=excluded.api_token,last_seen_at=now(),agent_version=excluded.agent_version,capacity_cpu=excluded.capacity_cpu,capacity_memory_mb=excluded.capacity_memory_mb,capacity_disk_mb=excluded.capacity_disk_mb;"
 
-# Verify DNS/network from panel to DB and CrakNode.
+# Remove orphaned allocations from failed provisioning attempts.
+"${COMPOSE[@]}" exec -T postgres psql -U crakhost -d crakhost -c "DELETE FROM allocations a WHERE NOT EXISTS (SELECT 1 FROM servers s WHERE s.id=a.server_id);" >/dev/null
+
+# Verify all internal links, including authenticated CrakNode diagnostics.
 "${COMPOSE[@]}" exec -T panel node -e "require('dns').lookup('postgres',(e,a)=>{if(e){console.error(e);process.exit(1)};console.log('postgres:',a)})"
-"${COMPOSE[@]}" exec -T panel node -e "fetch('http://craknode:8088/health').then(r=>r.text()).then(x=>console.log('craknode:',x)).catch(e=>{console.error(e);process.exit(1)})"
+"${COMPOSE[@]}" exec -T panel node -e "fetch('http://craknode:8088/health').then(async r=>console.log('craknode health:',r.status,await r.text())).catch(e=>{console.error(e);process.exit(1)})"
+"${COMPOSE[@]}" exec -T panel node -e "fetch('http://craknode:8088/diagnostics',{headers:{authorization:'Bearer '+process.env.CRAKNODE_TOKEN}}).then(async r=>{console.log('craknode auth:',r.status,await r.text());if(!r.ok)process.exit(1)}).catch(e=>{console.error(e);process.exit(1)})"
 
-echo "Production repair complete. Legacy demo server removed; real VPS node registered as $NODE_NAME."
-echo "Refresh the panel. Create a new Minecraft/FiveM server through Deploy Server to provision a real container."
+echo "Production repair complete."
+echo "Real node: $NODE_NAME | CPU: $NODE_CPU | RAM: ${NODE_MEMORY_MB}MB | Disk: ${NODE_DISK_MB}MB"
+echo "Legacy demo container removed, stale allocations cleaned, authenticated CrakNode link verified."
