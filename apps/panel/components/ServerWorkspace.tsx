@@ -1,39 +1,5 @@
 'use client';
 import {useState} from 'react';
-import {Activity,Terminal,Folder,ShieldCheck,Database,Network,Users,CalendarClock,Settings,Gamepad2} from 'lucide-react';
-import ServerControl from './ServerControl';
-import FileManager from './FileManager';
-import BackupManager from './BackupManager';
-import NetworkManager from './NetworkManager';
-import SubuserManager from './SubuserManager';
-import ScheduleManager from './ScheduleManager';
-import ServerSettings from './ServerSettings';
-import DatabaseManager from './DatabaseManager';
-
-export default function ServerWorkspace({id}:{id:string}){
-  const [tab,setTab]=useState('overview');
-  const tabs=[
-    ['overview',Activity,'Overview'],['console',Terminal,'Console'],['files',Folder,'File Manager'],
-    ['databases',Database,'Databases'],['network',Network,'Network'],['backups',ShieldCheck,'Backups'],
-    ['users',Users,'Users'],['schedules',CalendarClock,'Schedules'],['settings',Settings,'Settings']
-  ] as const;
-
-  return <div className="serverWorkspaceV17">
-    <div className="serverHeroStrip">
-      <div className="serverHeroIcon"><Gamepad2 size={24}/></div>
-      <div className="serverHeroText"><span>MANAGED INSTANCE</span><b>{id}</b><small>Real-time controls powered by CrakNode</small></div>
-      <div className="serverHeroChip"><span className="pulse"/> LIVE AGENT</div>
-    </div>
-    <div className="workspaceTabs">{tabs.map(([k,I,l])=><button key={k} onClick={()=>setTab(k)} className={`workspaceTab ${tab===k?'active':''}`}><I size={15}/><span>{l}</span></button>)}</div>
-    <div className="workspaceBody">
-      {(tab==='overview'||tab==='console')&&<ServerControl id={id} mode={tab}/>} 
-      {tab==='files'&&<FileManager id={id}/>} 
-      {tab==='backups'&&<BackupManager id={id}/>} 
-      {tab==='network'&&<NetworkManager id={id}/>} 
-      {tab==='users'&&<SubuserManager id={id}/>} 
-      {tab==='schedules'&&<ScheduleManager id={id}/>} 
-      {tab==='settings'&&<ServerSettings id={id}/>} 
-      {tab==='databases'&&<DatabaseManager id={id}/>} 
-    </div>
-  </div>
-}
+import {Activity,Terminal,Folder,ShieldCheck,Database,Network,Users,CalendarClock,Settings,Gamepad2,SlidersHorizontal} from 'lucide-react';
+import ServerControl from './ServerControl';import FileManager from './FileManager';import BackupManager from './BackupManager';import NetworkManager from './NetworkManager';import SubuserManager from './SubuserManager';import ScheduleManager from './ScheduleManager';import ServerSettings from './ServerSettings';import DatabaseManager from './DatabaseManager';import StartupManager from './StartupManager';
+export default function ServerWorkspace({id}:{id:string}){const[tab,setTab]=useState('overview');const tabs=[['overview',Activity,'Overview'],['console',Terminal,'Console'],['files',Folder,'File Manager'],['databases',Database,'Databases'],['network',Network,'Network'],['backups',ShieldCheck,'Backups'],['users',Users,'Users'],['schedules',CalendarClock,'Schedules'],['startup',SlidersHorizontal,'Startup'],['settings',Settings,'Settings']]as const;return <div className="serverWorkspaceV17"><div className="serverHeroStrip"><div className="serverHeroIcon"><Gamepad2 size={24}/></div><div className="serverHeroText"><span>MANAGED INSTANCE</span><b>{id}</b><small>Real-time controls powered by CrakNode</small></div><div className="serverHeroChip"><span className="pulse"/> LIVE AGENT</div></div><div className="workspaceTabs">{tabs.map(([k,I,l])=><button key={k} onClick={()=>setTab(k)} className={`workspaceTab ${tab===k?'active':''}`}><I size={15}/><span>{l}</span></button>)}</div><div className="workspaceBody">{(tab==='overview'||tab==='console')&&<ServerControl id={id} mode={tab}/>} {tab==='files'&&<FileManager id={id}/>} {tab==='backups'&&<BackupManager id={id}/>} {tab==='network'&&<NetworkManager id={id}/>} {tab==='users'&&<SubuserManager id={id}/>} {tab==='schedules'&&<ScheduleManager id={id}/>} {tab==='startup'&&<StartupManager id={id}/>} {tab==='settings'&&<ServerSettings id={id}/>} {tab==='databases'&&<DatabaseManager id={id}/>}</div></div>}
