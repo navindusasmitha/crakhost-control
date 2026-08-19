@@ -39,7 +39,7 @@ if [ -z "$DOMAIN" ] || [ -z "$EMAIL" ]; then
 fi
 printf '\nPANEL_DOMAIN=%s\nACME_EMAIL=%s\nCRAKHOST_GITHUB_REPO=%s\n' "$DOMAIN" "$EMAIL" "$REPO" >> .env
 
-# Create persistent volumes if this is a fresh VPS.
+# Fresh or existing persistent volumes.
 docker volume create "${CRAKHOST_PGDATA_VOLUME:-crakhost-pgdata}" >/dev/null
 docker volume create "${CRAKHOST_MINECRAFT_VOLUME:-crakhost-minecraft-data}" >/dev/null
 docker volume create "${CRAKHOST_BACKUPS_VOLUME:-crakhost-node-backups}" >/dev/null
@@ -54,10 +54,7 @@ fi
 echo "Waiting for PostgreSQL health..."
 READY=0
 for i in $(seq 1 60); do
-  if docker compose -f docker-compose.yml -f docker-compose.production.yml exec -T postgres pg_isready -U crakhost -d crakhost >/dev/null 2>&1; then
-    READY=1
-    break
-  fi
+  if docker compose -f docker-compose.yml -f docker-compose.production.yml exec -T postgres pg_isready -U crakhost -d crakhost >/dev/null 2>&1; then READY=1; break; fi
   sleep 2
 done
 if [ "$READY" -ne 1 ]; then
@@ -66,11 +63,27 @@ if [ "$READY" -ne 1 ]; then
   exit 1
 fi
 
-cat database/migrations/v0.13.sql | docker compose -f docker-compose.yml -f docker-compose.production.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U crakhost -d crakhost
+# Apply all idempotent migrations, including removal of legacy demo rows.
+for f in database/migrations/v*.sql; do
+  cat "$f" | docker compose -f docker-compose.yml -f docker-compose.production.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U crakhost -d crakhost >/dev/null
+done
 
-docker compose -f docker-compose.yml -f docker-compose.production.yml exec -T postgres psql -U crakhost -d crakhost -c "UPDATE nodes SET base_url='http://craknode:8088' WHERE name='LOCAL-DEV-01';" >/dev/null
+# Register this real VPS CrakNode. The panel and node share the crakhost Docker network.
+NODE_NAME="$(hostname -s | tr -cd '[:alnum:]._-')"
+[ -n "$NODE_NAME" ] || NODE_NAME="CRAKHOST-VPS-01"
+NODE_LOCATION="${CRAKHOST_NODE_LOCATION:-VPS}"
+docker compose -f docker-compose.yml -f docker-compose.production.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U crakhost -d crakhost \
+  -v node_name="$NODE_NAME" -v node_location="$NODE_LOCATION" -v node_token="$NODE" \
+  -c "INSERT INTO nodes(name,location,base_url,enabled,api_token,last_seen_at,agent_version) VALUES (:'node_name',:'node_location','http://craknode:8088',true,:'node_token',now(),'0.14.0') ON CONFLICT(name) DO UPDATE SET location=excluded.location,base_url=excluded.base_url,enabled=true,api_token=excluded.api_token,last_seen_at=now(),agent_version=excluded.agent_version;" >/dev/null
+
+# Verify panel can really reach CrakNode before declaring success.
+if ! docker compose -f docker-compose.yml -f docker-compose.production.yml exec -T panel node -e "fetch('http://craknode:8088/health').then(r=>{if(!r.ok)process.exit(2);return r.text()}).then(()=>console.log('CrakNode link OK')).catch(()=>process.exit(3))"; then
+  echo "CrakNode connectivity check failed." >&2
+  exit 1
+fi
 
 echo
 echo "CrakHost installation complete."
 echo "Panel: https://$DOMAIN"
+echo "Node: $NODE_NAME ($NODE_LOCATION)"
 echo "Check: cd $DIR && docker compose -f docker-compose.yml -f docker-compose.production.yml ps"
