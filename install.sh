@@ -5,6 +5,16 @@ set -euo pipefail
 REPO="${CRAKHOST_REPO:-navindusasmitha/crakhost-control}"
 DIR="${CRAKHOST_DIR:-/opt/crakhost}"
 
+# The installer is normally executed through `curl | bash`, so interactive
+# questions must read from the terminal instead of script stdin.
+if [ ! -r /dev/tty ]; then
+  echo "A TTY is required for domain/email setup."
+  exit 1
+fi
+
+# Never remove the directory that the calling shell is currently inside.
+cd /
+
 apt-get update
 apt-get install -y ca-certificates curl git openssl
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
@@ -22,12 +32,21 @@ sed -i "s/change-me-now/$DBPASS/g;s/replace-with-a-long-random-node-token/$NODE/
 # Container-to-container service URLs for production compose
 sed -i "s#@localhost:5432#@postgres:5432#g;s#redis://localhost:6379#redis://redis:6379#g;s#http://localhost:8088#http://craknode:8088#g" .env
 
-read -rp "Panel domain (panel.example.com): " DOMAIN
-read -rp "ACME email: " EMAIL
+DOMAIN=""
+EMAIL=""
+while [ -z "$DOMAIN" ]; do
+  read -rp "Panel domain (panel.example.com): " DOMAIN </dev/tty
+  DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%%/*}"
+done
+while [ -z "$EMAIL" ]; do
+  read -rp "ACME email: " EMAIL </dev/tty
+done
 printf '\nPANEL_DOMAIN=%s\nACME_EMAIL=%s\nCRAKHOST_GITHUB_REPO=%s\n' "$DOMAIN" "$EMAIL" "$REPO" >> .env
 
 # Fresh VPS volumes: create if missing, preserve if already present.
-source .env || true
+set -a
+source .env
+set +a
 docker volume create "${CRAKHOST_PGDATA_VOLUME:-crakhost-pgdata}" >/dev/null
 docker volume create "${CRAKHOST_MINECRAFT_VOLUME:-crakhost-minecraft-data}" >/dev/null
 docker volume create "${CRAKHOST_BACKUPS_VOLUME:-crakhost-node-backups}" >/dev/null
@@ -56,6 +75,6 @@ cat database/migrations/v0.13.sql | docker compose -f docker-compose.yml -f dock
 docker compose -f docker-compose.yml -f docker-compose.production.yml exec -T postgres psql -U crakhost -d crakhost -c "UPDATE nodes SET base_url='http://craknode:8088' WHERE name='LOCAL-DEV-01';" >/dev/null
 
 echo
- echo "CrakHost installation complete."
+echo "CrakHost installation complete."
 echo "Panel: https://$DOMAIN"
 echo "Check: cd $DIR && docker compose -f docker-compose.yml -f docker-compose.production.yml ps"
