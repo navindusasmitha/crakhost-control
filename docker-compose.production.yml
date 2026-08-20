@@ -5,28 +5,15 @@ services:
       dockerfile: docker/panel.Dockerfile
     restart: unless-stopped
     env_file: .env
+    ports:
+      - "127.0.0.1:4310:4310"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
     networks: [crakhost]
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports: ["80:80","443:443","443:443/udp"]
-    environment:
-      PANEL_DOMAIN: ${PANEL_DOMAIN}
-      ACME_EMAIL: ${ACME_EMAIL}
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on: [panel]
-    networks: [crakhost]
-volumes:
-  caddy_data:
-  caddy_config:
+
 networks:
   crakhost:
     name: crakhost
