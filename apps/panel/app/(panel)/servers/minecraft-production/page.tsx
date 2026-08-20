@@ -1,1 +1,0 @@
-import ServerWorkspace from '../../../../components/ServerWorkspace';export default function ServerPage(){return <><div className="pageHead"><div><p>Servers / Survival-MC-01</p><h1>Minecraft Production</h1><p>CrakNode managed · Primary allocation: <span style={{color:'#d1d5db'}}>127.0.0.1:25565</span></p></div></div><ServerWorkspace id="minecraft-production"/></>}
