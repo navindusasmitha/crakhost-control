@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import {Zap,LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Users,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart} from 'lucide-react';
+import {Zap,LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Users,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart,Receipt} from 'lucide-react';
 import {getCurrentUser,isStaff} from '@/lib/auth';
 
 export default async function Sidebar(){
@@ -19,8 +19,8 @@ export default async function Sidebar(){
       <Link href="/support"><Headphones size={17}/>Support</Link>
       <Link href="/settings"><Settings size={17}/>Settings</Link>
       <Link href="/security"><LockKeyhole size={17}/>Security</Link>
-      {staff&&<><div className="navTitle">ADMINISTRATION</div><Link href="/admin"><Shield size={17}/>Admin Center</Link><Link href="/nodes"><Boxes size={17}/>Nodes</Link><Link href="/admin"><Users size={17}/>Customers</Link><Link href="/developer"><Code2 size={17}/>Developer</Link><Link href="/operations"><ActivitySquare size={17}/>Operations</Link><Link href="/infrastructure"><Network size={17}/>Infrastructure</Link><Link href="/deployment"><Rocket size={17}/>Deployment</Link></>}
+      {staff&&<><div className="navTitle">ADMINISTRATION</div><Link href="/admin"><Shield size={17}/>Admin Center</Link><Link href="/admin/orders"><Receipt size={17}/>Orders</Link><Link href="/nodes"><Boxes size={17}/>Nodes</Link><Link href="/admin"><Users size={17}/>Customers</Link><Link href="/developer"><Code2 size={17}/>Developer</Link><Link href="/operations"><ActivitySquare size={17}/>Operations</Link><Link href="/infrastructure"><Network size={17}/>Infrastructure</Link><Link href="/deployment"><Rocket size={17}/>Deployment</Link></>}
     </nav>
-    <div className="sidebarBottom"><div className="online"><span className="pulse"/>CrakHost Control · v0.24</div></div>
+    <div className="sidebarBottom"><div className="online"><span className="pulse"/>CrakHost Control · v0.25</div></div>
   </aside>
 }
