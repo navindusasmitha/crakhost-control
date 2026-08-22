@@ -12,6 +12,8 @@ import (
 
 type hostPressure struct{ Load1, MemoryUsedPct float64; CPUs int; Level string }
 
+func init(){go performanceController()}
+
 func readHostPressure() hostPressure {
  p:=hostPressure{CPUs:runtime.NumCPU(),Level:"normal"}
  if b,e:=os.ReadFile("/proc/loadavg");e==nil { f:=strings.Fields(string(b)); if len(f)>0 { p.Load1,_=strconv.ParseFloat(f[0],64) } }
@@ -32,8 +34,7 @@ func tuneManagedContainers(p hostPressure){
  raw,e:=docker("ps","--filter","label=crakhost.managed=true","--format","{{.Names}}");if e!=nil{return}
  names:=strings.Fields(strings.TrimSpace(raw));if len(names)==0{return}
  for _,name:=range names{
-  // Never raise a customer's configured CPU/RAM allocation. The controller only
-  // changes scheduling weight so busy hosts remain responsive and fair.
+  // Preserve configured CPU/RAM ceilings; adjust only relative CPU scheduling weight.
   weight:="512";if p.Level=="high"{weight="384"};if p.Level=="critical"{weight="256"}
   _,_ = docker("update","--cpu-shares",weight,name)
  }
