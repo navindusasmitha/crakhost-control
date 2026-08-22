@@ -1,4 +1,17 @@
 services:
+  migrate:
+    image: postgres:16-alpine
+    restart: "no"
+    env_file: .env
+    entrypoint: ["/bin/sh","/migrate.sh"]
+    volumes:
+      - ./docker/migrate.sh:/migrate.sh:ro
+      - ./database/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [crakhost]
+
   panel:
     build:
       context: .
@@ -12,6 +25,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
     networks: [crakhost]
 
 networks:
