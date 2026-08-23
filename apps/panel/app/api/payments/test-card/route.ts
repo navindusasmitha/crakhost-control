@@ -1,10 +1,12 @@
 import {NextRequest,NextResponse} from 'next/server';
 import {getCurrentUser} from '@/lib/auth';
 import {db} from '@/lib/db';
+import {sendTemplateEmail} from '@/lib/mail';
 import {preflightProvisioning,provisionServer} from '@/lib/provision';
 
 const successCards=new Set(['4242424242424242','5555555555554444']);
 const declineCards=new Set(['4000000000000002','4000000000009995']);
+function appBase(){const raw=process.env.APP_URL||process.env.PANEL_URL||(process.env.PANEL_DOMAIN?`https://${process.env.PANEL_DOMAIN}`:'');return raw.replace(/\/$/,'')}
 
 export async function POST(req:NextRequest){
   const user=await getCurrentUser();
@@ -46,6 +48,11 @@ export async function POST(req:NextRequest){
       if(config.game==='minecraft'&&config.software!=='default')env.TYPE=config.software.toUpperCase();
       const server=await provisionServer({ownerId:user.id,name:serverName,templateSlug,memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),planId:plan.id,location:config.location,environment:env});
       await db.query("update orders set status='ACTIVE',server_id=$2,node_id=$3,primary_port=$4,provisioned_at=now(),updated_at=now() where id=$1",[order.id,server.id,server.node_id,server.primary_port]);
+      const base=appBase();
+      await Promise.allSettled([
+        sendTemplateEmail('invoice_paid',user.email,{name:user.name,invoice_number:invoice,currency:plan.currency,amount:amount.toFixed(2),billing_url:base?`${base}/billing`:''}),
+        sendTemplateEmail('server_ready',user.email,{name:user.name,server_name:serverName,node_name:server.node_name||'',server_url:base?`${base}/servers/${server.identifier}`:''}),
+      ]);
       return NextResponse.json({ok:true,orderId:order.id,identifier:server.identifier,node:server.node_name,location:server.node_location},{status:201});
     }catch(e:any){
       const msg=String(e?.message||e).slice(0,700);
