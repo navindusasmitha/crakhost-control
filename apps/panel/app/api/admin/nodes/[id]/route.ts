@@ -2,6 +2,7 @@ import {NextRequest,NextResponse} from 'next/server';
 import {getCurrentUser,isStaff,isAdmin} from '@/lib/auth';
 import {db} from '@/lib/db';
 import {nodeFetchFor} from '@/lib/node';
+import {checkNodeRuntimeCapacity,nodeDiskPolicy} from '@/lib/node-capacity';
 import {audit} from '@/lib/audit';
 import {setNodeDrain} from '@/lib/operations-settings';
 
@@ -13,7 +14,7 @@ export async function GET(_:NextRequest,{params}:{params:Promise<{id:string}>}){
   const {id}=await params;
   const {rows}=await db.query(`
     select n.id,n.name,n.location,n.base_url,n.enabled,n.capacity_cpu,
-      n.capacity_memory_mb,n.capacity_disk_mb,n.last_seen_at,n.agent_version,
+      n.capacity_memory_mb,n.capacity_disk_mb,n.last_seen_at,n.agent_version,n.api_token,
       count(s.id) filter(where s.status<>'deleted')::int server_count,
       coalesce(sum(s.memory_mb) filter(where s.status<>'deleted'),0)::int used_memory_mb,
       coalesce(sum(s.disk_mb) filter(where s.status<>'deleted'),0)::int used_disk_mb,
@@ -36,20 +37,30 @@ export async function GET(_:NextRequest,{params}:{params:Promise<{id:string}>}){
       dockerVersion:d.dockerVersion||'',
       managedContainers:Number(d.managedContainers)||0,
       runningContainers:Number(d.runningContainers)||0,
+      diskPath:d.diskPath||'',
       diskFreeBytes:Number.isFinite(Number(d.diskFreeBytes))?Number(d.diskFreeBytes):null,
+      diskTotalBytes:Number.isFinite(Number(d.diskTotalBytes))?Number(d.diskTotalBytes):null,
+      hostCpus:Number.isFinite(Number(d.hostCpus))?Number(d.hostCpus):null,
+      load1:Number.isFinite(Number(d.load1))?Number(d.load1):null,
+      memoryTotalMb:Number.isFinite(Number(d.memoryTotalMb))?Number(d.memoryTotalMb):null,
+      memoryAvailableMb:Number.isFinite(Number(d.memoryAvailableMb))?Number(d.memoryAvailableMb):null,
+      memoryUsedPct:Number.isFinite(Number(d.memoryUsedPct))?Number(d.memoryUsedPct):null,
+      pressureLevel:String(d.pressureLevel||'unknown'),
     };
   }catch(e:any){
     diagnostics={status:'offline',error:String(e?.message||'Node unavailable').slice(0,180)};
   }
 
+  const {api_token:_,...safeNode}=n;
   return NextResponse.json({
     node:{
-      ...n,
+      ...safeNode,
       free_cpu:Math.max(0,Number(n.capacity_cpu)-Number(n.used_cpu)),
       free_memory_mb:Math.max(0,Number(n.capacity_memory_mb)-Number(n.used_memory_mb)),
       free_disk_mb:Math.max(0,Number(n.capacity_disk_mb)-Number(n.used_disk_mb)),
     },
     diagnostics,
+    provisioningPolicy:nodeDiskPolicy(),
   },{headers:{'cache-control':'no-store'}});
 }
 
@@ -77,20 +88,23 @@ export async function PATCH(req:NextRequest,{params}:{params:Promise<{id:string}
     if(Number(node.capacity_cpu)<=0||Number(node.capacity_memory_mb)<=0||Number(node.capacity_disk_mb)<=0){
       return NextResponse.json({error:'Node capacity is not valid yet'},{status:409});
     }
-    try{await nodeFetchFor(node,'/diagnostics')}
-    catch(e:any){
-      return NextResponse.json({error:`CrakNode diagnostics failed: ${String(e?.message||'node unavailable').slice(0,160)}`},{status:503});
+    const live=await checkNodeRuntimeCapacity(node,0);
+    if(!live.ok){
+      return NextResponse.json({error:`Node cannot be enabled for provisioning: ${live.reason}`},{status:409});
     }
+    await db.query('update nodes set enabled=true where id=$1',[id]);
   }else{
+    // Drain first. This shares the same node lock used by provisioning reservations,
+    // so no new workload can slip in while disable safety is being checked.
+    await setNodeDrain(id,true,u.id);
     const attached=await db.query(`select count(*)::int c from servers where node_id=$1 and status<>'deleted'`,[id]);
     const count=Number(attached.rows[0]?.c||0);
     if(count>0){
-      return NextResponse.json({error:'Move or delete all attached servers before disabling this node',attachedServers:count},{status:409});
+      return NextResponse.json({error:'Node is now drained. Move or delete all attached servers before disabling it.',attachedServers:count,draining:true},{status:409});
     }
+    await db.query('update nodes set enabled=false where id=$1',[id]);
   }
 
-  await db.query('update nodes set enabled=$2 where id=$1',[id,enabled]);
-  if(!enabled)await setNodeDrain(id,true,u.id);
   await audit(u.id,enabled?'node.enable':'node.disable','node',id,{name:node.name});
   return NextResponse.json({ok:true,enabled},{headers:{'cache-control':'no-store'}});
 }
