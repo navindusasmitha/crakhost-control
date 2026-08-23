@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import {usePathname} from 'next/navigation';
-import {Zap,LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart,Receipt} from 'lucide-react';
+import {Zap,LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart,Receipt,Mail} from 'lucide-react';
 
 type Item={href:string;label:string;icon:any};
 const client:Item[]=[
@@ -20,6 +20,7 @@ const account:Item[]=[
 const admin:Item[]=[
  {href:'/admin',label:'Admin Center',icon:Shield},
  {href:'/admin/orders',label:'Orders',icon:Receipt},
+ {href:'/admin/mail',label:'Mail Center',icon:Mail},
  {href:'/nodes',label:'Nodes',icon:Boxes},
  {href:'/infrastructure',label:'Infrastructure',icon:Network},
  {href:'/operations',label:'Operations',icon:ActivitySquare},
