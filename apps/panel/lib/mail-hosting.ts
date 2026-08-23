@@ -27,7 +27,7 @@ export function dnsRecords(domain:string,hostname:string,publicIp:string,selecto
     {type:'MX',name:domain,value:`10 ${hostname}.`,purpose:'Inbound mail'},
     {type:'TXT',name:domain,value:`v=spf1 mx a:${hostname}${cleanIp?` ip4:${cleanIp}`:''} -all`,purpose:'SPF sender policy'},
     {type:'TXT',name:`${selector}._domainkey.${domain}`,value:dkimValue||'<generated after CrakMail starts>',purpose:'DKIM signing key'},
-    {type:'TXT',name:`_dmarc.${domain}`,value:`v=DMARC1; p=quarantine; rua=mailto:dmarc@${domain}; adkim=s; aspf=s`,purpose:'DMARC policy'},
+    {type:'TXT',name:`_dmarc.${domain}`,value:`v=DMARC1; p=none; rua=mailto:dmarc@${domain}; adkim=s; aspf=s`,purpose:'DMARC monitoring policy; switch to quarantine/reject after SPF and DKIM are verified'},
     {type:'PTR',name:cleanIp||'<VPS_PUBLIC_IP>',value:`${hostname}.`,purpose:'Set at VPS provider, not normal DNS'},
   ];
 }

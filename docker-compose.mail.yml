@@ -1,50 +1,79 @@
 services:
   crakmail:
-    image: ghcr.io/docker-mailserver/docker-mailserver:latest
-    container_name: crakhost-mailserver
-    hostname: ${CRAKMAIL_HOSTNAME:?CRAKMAIL_HOSTNAME is required}
-    env_file:
-      - mailserver.env
+    build:
+      context: .
+      dockerfile: services/crakmail/Dockerfile
+    restart: unless-stopped
+    environment:
+      MAIL_DOMAIN: ${MAIL_DOMAIN:?MAIL_DOMAIN is required}
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME:?MAIL_HOSTNAME is required}
+      MAIL_PUBLIC_IP: ${MAIL_PUBLIC_IP:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      CRAKMAIL_DB_HOST: postgres
+      CRAKMAIL_DB_PORT: 5432
+      CRAKMAIL_DB_NAME: crakhost
+      CRAKMAIL_DB_USER: crakhost
+      CRAKMAIL_DKIM_SELECTOR: ${CRAKMAIL_DKIM_SELECTOR:-mail}
+      CRAKMAIL_DKIM_SYNC_SECONDS: ${CRAKMAIL_DKIM_SYNC_SECONDS:-30}
+      CRAKMAIL_TLS_CERT: /etc/letsencrypt/live/${MAIL_HOSTNAME}/fullchain.pem
+      CRAKMAIL_TLS_KEY: /etc/letsencrypt/live/${MAIL_HOSTNAME}/privkey.pem
     ports:
       - "25:25"
       - "465:465"
       - "587:587"
       - "993:993"
     volumes:
-      - crakmail_data:/var/mail
-      - crakmail_state:/var/mail-state
-      - crakmail_logs:/var/log/mail
-      - ./docker-data/dms/config:/tmp/docker-mailserver
+      - crakmail_mail:/var/mail/vhosts
+      - crakmail_state:/var/lib/crakmail
       - /etc/letsencrypt:/etc/letsencrypt:ro
-      - /etc/localtime:/etc/localtime:ro
-    restart: unless-stopped
-    stop_grace_period: 1m
-    networks: [crakhost]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      crakhost:
+        aliases:
+          - ${MAIL_HOSTNAME}
 
-  crakwebmail:
-    image: ghcr.io/the-djmaze/snappymail:latest
-    container_name: crakhost-webmail
+  roundcube:
+    image: roundcube/roundcubemail:1.6.18-apache
     restart: unless-stopped
+    environment:
+      ROUNDCUBEMAIL_DEFAULT_HOST: ssl://${MAIL_HOSTNAME}
+      ROUNDCUBEMAIL_DEFAULT_PORT: 993
+      ROUNDCUBEMAIL_SMTP_SERVER: tls://${MAIL_HOSTNAME}
+      ROUNDCUBEMAIL_SMTP_PORT: 587
+      ROUNDCUBEMAIL_USERNAME_DOMAIN: ${MAIL_DOMAIN}
+      ROUNDCUBEMAIL_SKIN: elastic
+      ROUNDCUBEMAIL_PLUGINS: archive,zipdownload
+      ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: 25M
     ports:
-      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:8888:80"
     volumes:
-      - crakwebmail_data:/var/lib/snappymail
+      - roundcube_db:/var/roundcube/db
     depends_on:
       crakmail:
-        condition: service_started
+        condition: service_healthy
     networks: [crakhost]
 
+  panel:
+    environment:
+      CRAKMAIL_DKIM_DIR: /var/lib/crakmail/dkim
+      CRAKMAIL_WEBMAIL_URL: https://${MAIL_HOSTNAME}
+      CRAKMAIL_HOSTNAME: ${MAIL_HOSTNAME}
+      MAIL_PUBLIC_IP: ${MAIL_PUBLIC_IP:-}
+    volumes:
+      - crakmail_state:/var/lib/crakmail:ro
+
 volumes:
-  crakmail_data:
-    name: crakhost-mail-data
+  crakmail_mail:
+    name: ${CRAKMAIL_MAIL_VOLUME:-crakhost-mail-vhosts}
   crakmail_state:
-    name: crakhost-mail-state
-  crakmail_logs:
-    name: crakhost-mail-logs
-  crakwebmail_data:
-    name: crakhost-webmail-data
+    name: ${CRAKMAIL_STATE_VOLUME:-crakhost-mail-state}
+  roundcube_db:
+    name: ${CRAKMAIL_WEBMAIL_VOLUME:-crakhost-roundcube-db}
 
 networks:
   crakhost:
-    external: true
     name: crakhost
