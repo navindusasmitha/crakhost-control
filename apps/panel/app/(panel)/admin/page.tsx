@@ -1,1 +1,2 @@
-import AdminManager from '../../../components/AdminManager';export default function Admin(){return <><div className="pageHead"><div><p>BUSINESS CONTROL</p><h1>Admin Center</h1><p>Customers, servers, infrastructure metrics and audit history.</p></div></div><section className="section"><AdminManager/></section></>}
+import AdminManager from '../../../components/AdminManager';
+export default function Admin(){return <AdminManager/>}
