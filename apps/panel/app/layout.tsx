@@ -1,6 +1,7 @@
 import './globals.css';
 import './modern.css';
 import './phase2.css';
+import './public-v2.css';
 
 export const metadata={
   title:'CrakHost Control',
