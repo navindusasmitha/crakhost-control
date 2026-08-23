@@ -30,13 +30,3 @@ CREATE TABLE IF NOT EXISTS audit_events (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
-
-INSERT INTO nodes(name,location,base_url,enabled)
-VALUES ('LOCAL-DEV-01','Local Docker Desktop','http://localhost:8088',true)
-ON CONFLICT(name) DO NOTHING;
-
-INSERT INTO servers(owner_id,node_id,name,identifier,container_name,image,cpu_limit,memory_mb,disk_mb,primary_ip,primary_port,status)
-SELECT u.id,n.id,'Minecraft Production','minecraft-production','crakhost-minecraft-production','itzg/minecraft-server:latest',2,2048,20000,'127.0.0.1',25565,'offline'
-FROM users u CROSS JOIN nodes n
-WHERE u.email='admin@crakhost.local' AND n.name='LOCAL-DEV-01'
-ON CONFLICT(identifier) DO NOTHING;

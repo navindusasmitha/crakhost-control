@@ -2,7 +2,7 @@ name: CrakHost Build Gate
 
 on:
   push:
-    branches: [main, v026-stability-overhaul]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -26,3 +26,15 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: '1'
         run: npm run build
+
+  craknode-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+      - name: Compile CrakNode
+        working-directory: services/craknode
+        run: go test ./...

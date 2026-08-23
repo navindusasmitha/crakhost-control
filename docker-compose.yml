@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: crakhost
       POSTGRES_USER: crakhost
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-now}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
@@ -27,9 +27,9 @@ services:
     restart: unless-stopped
     working_dir: /app
     environment:
-      CRAKNODE_TOKEN: ${CRAKNODE_TOKEN:-change-this-node-token}
-      CRAKNODE_SERVER_CONTAINER: crakhost-minecraft-production
+      CRAKNODE_TOKEN: ${CRAKNODE_TOKEN:?CRAKNODE_TOKEN is required}
       CRAKNODE_BACKUP_DIR: /backups
+      CRAKNODE_CAPACITY_PATH: /backups
       CRAKNODE_TRANSFER_LISTEN: :8089
       CRAKNODE_TRANSFER_MAX_MB: ${CRAKNODE_TRANSFER_MAX_MB:-512}
       CRAKNODE_DNS_PRIMARY: ${DOCKER_DNS_1:-1.1.1.1}
@@ -37,7 +37,7 @@ services:
       CRAKNODE_PANEL_URL: ${CRAKNODE_PANEL_URL:-http://panel:4310}
       CRAKNODE_REGISTRATION_TOKEN: ${CRAKNODE_REGISTRATION_TOKEN:-}
       CRAKNODE_NAME: ${CRAKNODE_NAME:-}
-      CRAKNODE_LOCATION: ${CRAKNODE_LOCATION:-Auto Registered}
+      CRAKNODE_LOCATION: ${CRAKNODE_LOCATION:-}
       CRAKNODE_PUBLIC_URL: ${CRAKNODE_PUBLIC_URL:-http://craknode:8088}
       CRAKNODE_HEARTBEAT_INTERVAL: ${CRAKNODE_HEARTBEAT_INTERVAL:-60}
     volumes:
@@ -53,30 +53,9 @@ services:
       start_period: 25s
     networks: [crakhost]
 
-  minecraft-demo:
-    image: itzg/minecraft-server:latest
-    profiles: ["demo-game"]
-    container_name: crakhost-minecraft-production
-    environment:
-      EULA: "TRUE"
-      MEMORY: "2G"
-      ENABLE_RCON: "TRUE"
-    ports: ["25565:25565"]
-    dns:
-      - ${DOCKER_DNS_1:-1.1.1.1}
-      - ${DOCKER_DNS_2:-8.8.8.8}
-    cpus: 2.0
-    mem_limit: 2g
-    volumes:
-      - minecraft_data:/data
-    restart: unless-stopped
-    networks: [crakhost]
-
 volumes:
   pgdata:
     name: ${CRAKHOST_PGDATA_VOLUME:-crakhost-pgdata}
-  minecraft_data:
-    name: ${CRAKHOST_MINECRAFT_VOLUME:-crakhost-minecraft-data}
   craknode_backups:
     name: ${CRAKHOST_BACKUPS_VOLUME:-crakhost-node-backups}
 
