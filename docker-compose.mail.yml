@@ -1,0 +1,50 @@
+services:
+  crakmail:
+    image: ghcr.io/docker-mailserver/docker-mailserver:latest
+    container_name: crakhost-mailserver
+    hostname: ${CRAKMAIL_HOSTNAME:?CRAKMAIL_HOSTNAME is required}
+    env_file:
+      - mailserver.env
+    ports:
+      - "25:25"
+      - "465:465"
+      - "587:587"
+      - "993:993"
+    volumes:
+      - crakmail_data:/var/mail
+      - crakmail_state:/var/mail-state
+      - crakmail_logs:/var/log/mail
+      - ./docker-data/dms/config:/tmp/docker-mailserver
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    stop_grace_period: 1m
+    networks: [crakhost]
+
+  crakwebmail:
+    image: ghcr.io/the-djmaze/snappymail:latest
+    container_name: crakhost-webmail
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8888"
+    volumes:
+      - crakwebmail_data:/var/lib/snappymail
+    depends_on:
+      crakmail:
+        condition: service_started
+    networks: [crakhost]
+
+volumes:
+  crakmail_data:
+    name: crakhost-mail-data
+  crakmail_state:
+    name: crakhost-mail-state
+  crakmail_logs:
+    name: crakhost-mail-logs
+  crakwebmail_data:
+    name: crakhost-webmail-data
+
+networks:
+  crakhost:
+    external: true
+    name: crakhost
