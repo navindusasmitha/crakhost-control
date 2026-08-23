@@ -163,10 +163,10 @@ service lmtp {
   }
 }
 protocol imap {
-  mail_plugins = $mail_plugins imap_quota
+  mail_plugins = \$mail_plugins imap_quota
 }
 protocol lmtp {
-  mail_plugins = $mail_plugins quota
+  mail_plugins = \$mail_plugins quota
   postmaster_address = postmaster@${MAIL_DOMAIN}
 }
 
