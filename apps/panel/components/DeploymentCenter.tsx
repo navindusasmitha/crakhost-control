@@ -1,25 +1,16 @@
 'use client';
-import {useEffect,useState} from 'react';
-
+import{useEffect,useState}from'react';
+import{RefreshCw,GitBranch,ShieldCheck,Server,ExternalLink}from'lucide-react';
 type UpdateInfo={installed?:string;latest?:string;name?:string;published_at?:string;update_available?:boolean;release_url?:string;error?:string};
-
 export default function DeploymentCenter(){
- const [u,setU]=useState<UpdateInfo|null>(null);const [loading,setLoading]=useState(false);
+ const[u,setU]=useState<UpdateInfo|null>(null),[loading,setLoading]=useState(false);
  async function check(){setLoading(true);try{const r=await fetch('/api/admin/update/check',{cache:'no-store'});const j=await r.json();setU(j)}catch{setU({error:'Unable to reach update service'})}finally{setLoading(false)}}
- useEffect(()=>{check()},[]);
- return <div className="stack">
-  <div className="pageHeader"><div><div className="eyebrow">PRODUCTION CONTROL</div><h1>Deployment & Updates</h1><p className="muted">Safe release checks, production updater and rollback-ready deployment.</p></div></div>
-  <div className="grid3">
-   <div className="card"><div className="cardTitle">Installed</div><h2>{u?.installed||'v0.26.0'}</h2><p className="muted">CrakHost Control production channel</p></div>
-   <div className="card"><div className="cardTitle">Web gateway</div><h2>Nginx + Certbot</h2><p className="muted">Uses the existing host reverse proxy; no Caddy port collision.</p></div>
-   <div className="card"><div className="cardTitle">Repository</div><h2>crakhost-control</h2><p className="muted">navindusasmitha/crakhost-control · main</p></div>
-  </div>
-  <div className="card"><div className="cardTitle">Update Center</div><p className="muted">Checks GitHub for the newest release. Installation remains root-owned so the web panel never receives Docker or root privileges.</p>
-   <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}><button className="primaryBtn" onClick={check} disabled={loading}>{loading?'Checking…':'Check for updates'}</button>{u?.update_available&&<span className="badge">UPDATE AVAILABLE · {u.latest}</span>}{u&&!u.error&&!u.update_available&&<span className="badge">UP TO DATE</span>}</div>
-   {u?.error?<div className="console" style={{marginTop:14}}>Update check failed: {u.error}</div>:u&&<div className="console" style={{marginTop:14}}>Installed: {u.installed}\nLatest: {u.latest||'No GitHub release published'}\nRelease: {u.name||'-'}\nPublished: {u.published_at||'-'}\nStatus: {u.update_available?'Update available':'Up to date'}</div>}
-  </div>
-  <div className="card"><div className="cardTitle">Safe one-command update</div><p className="muted">Fetches main, builds before restart, runs migrations through Compose, verifies Panel + CrakNode health, and preserves the previous commit when the build fails.</p><code>cd /opt/crakhost &amp;&amp; sudo ./scripts/update-production.sh</code></div>
-  <div className="card"><div className="cardTitle">Fresh VPS install</div><code>curl -fsSL https://raw.githubusercontent.com/navindusasmitha/crakhost-control/main/install.sh | sudo bash</code></div>
-  <div className="card"><div className="cardTitle">Security model</div><p className="muted">Update checks are ADMIN-only. The browser can inspect releases but cannot execute shell commands, Docker, git reset or sudo. Production installation is intentionally performed by the root-owned updater.</p></div>
- </div>
+ useEffect(()=>{void check()},[]);
+ return <>
+  <section className="opsHero"><div className="heroCopy"><div className="eyebrow">PRODUCTION CONTROL</div><h1>Deployment & <span>updates</span></h1><p>Release checks and documented production commands without granting the browser shell or Docker privileges.</p></div><div className="heroActions"><button className="btn" onClick={check} disabled={loading}><RefreshCw size={14}/>{loading?'Checking':'Check releases'}</button></div></section>
+  <section className="deployGrid panelSection"><Card label="Installed version" value={u?.installed||'Unknown'} icon={<Server size={14}/>}/><Card label="Latest release" value={u?.latest||'Not published'} icon={<GitBranch size={14}/>}/><Card label="Release state" value={u?.error?'Check failed':u?.update_available?'Update available':u?'Up to date':'Checking'} icon={<ShieldCheck size={14}/>}/></section>
+  <section className="card panelSection"><div className="panelSectionHead"><div><h2>Release status</h2><p>Data returned by the admin-only update-check endpoint.</p></div>{u?.release_url&&<a className="btn" href={u.release_url} target="_blank" rel="noreferrer">Release <ExternalLink size={13}/></a>}</div>{u?.error?<div className="notice error">{u.error}</div>:<div className="releaseBox"><div className="timelineRow"><span><b>Installed</b><small>Version reported by the running panel</small></span><b>{u?.installed||'Unknown'}</b></div><div className="timelineRow"><span><b>Latest</b><small>{u?.name||'No release title returned'}</small></span><b>{u?.latest||'Not published'}</b></div><div className="timelineRow"><span><b>Published</b><small>Release timestamp</small></span><b>{u?.published_at?new Date(u.published_at).toLocaleString():'-'}</b></div></div>}</section>
+  <section className="deployGrid panelSection"><div className="deployCard"><span>Production update</span><strong>Safe updater</strong><p className="small">Builds, migrates and verifies the stack while keeping root operations outside the web panel.</p><code className="codeBlock">cd /opt/crakhost &amp;&amp; sudo ./scripts/update-production.sh</code></div><div className="deployCard"><span>Fresh VPS</span><strong>Installer</strong><p className="small">Bootstrap a new host from the main branch.</p><code className="codeBlock">curl -fsSL https://raw.githubusercontent.com/navindusasmitha/crakhost-control/main/install.sh | sudo bash</code></div><div className="deployCard"><span>Security model</span><strong>Browser stays unprivileged</strong><p className="small">Update checks can inspect release metadata, but the panel does not execute sudo, git reset or Docker commands from the browser.</p></div></section>
+ </>
 }
+function Card({label,value,icon}:{label:string;value:string;icon:React.ReactNode}){return <div className="deployCard"><span>{label}</span><strong>{value}</strong><div style={{marginTop:9,color:'#8f99ae'}}>{icon}</div></div>}
