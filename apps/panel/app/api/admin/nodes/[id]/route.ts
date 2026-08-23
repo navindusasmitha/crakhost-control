@@ -8,7 +8,7 @@ import {setNodeDrain} from '@/lib/operations-settings';
 
 export const dynamic='force-dynamic';
 
-export async function GET(_:NextRequest,{params}:{params:Promise<{id:string}>}){
+export async function GET(_req:NextRequest,{params}:{params:Promise<{id:string}>}){
   const u=await getCurrentUser();
   if(!isStaff(u))return NextResponse.json({error:'Forbidden'},{status:403});
   const {id}=await params;
@@ -51,7 +51,7 @@ export async function GET(_:NextRequest,{params}:{params:Promise<{id:string}>}){
     diagnostics={status:'offline',error:String(e?.message||'Node unavailable').slice(0,180)};
   }
 
-  const {api_token:_,...safeNode}=n;
+  const {api_token:_apiToken,...safeNode}=n;
   return NextResponse.json({
     node:{
       ...safeNode,
@@ -94,8 +94,6 @@ export async function PATCH(req:NextRequest,{params}:{params:Promise<{id:string}
     }
     await db.query('update nodes set enabled=true where id=$1',[id]);
   }else{
-    // Drain first. This shares the same node lock used by provisioning reservations,
-    // so no new workload can slip in while disable safety is being checked.
     await setNodeDrain(id,true,u.id);
     const attached=await db.query(`select count(*)::int c from servers where node_id=$1 and status<>'deleted'`,[id]);
     const count=Number(attached.rows[0]?.c||0);
