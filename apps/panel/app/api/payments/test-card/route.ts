@@ -1,1 +1,69 @@
-import {NextRequest,NextResponse} from 'next/server';import {getCurrentUser} from '@/lib/auth';import {db} from '@/lib/db';import {provisionServer} from '@/lib/provision';const successCards=new Set(['4242424242424242','5555555555554444']);const declineCards=new Set(['4000000000000002','4000000000009995']);export async function POST(req:NextRequest){const user=await getCurrentUser();if(!user)return NextResponse.json({error:'Sign in required'},{status:401});try{const b=await req.json();const planSlug=String(b.plan||'');const serverName=String(b.serverName||'My Game Server').trim().slice(0,120);const card=String(b.cardNumber||'').replace(/\D/g,'');const exp=String(b.expiry||'').trim();const cvc=String(b.cvc||'').trim();const config={game:String(b.game||'game').slice(0,30),location:String(b.location||'auto').slice(0,100),software:String(b.software||'default').slice(0,80)};if(!/^\d{16}$/.test(card)||!/^\d{2}\/\d{2}$/.test(exp)||!/^\d{3,4}$/.test(cvc))return NextResponse.json({error:'Enter valid test card details.'},{status:400});if(declineCards.has(card))return NextResponse.json({error:'Test card declined.'},{status:402});if(!successCards.has(card))return NextResponse.json({error:'Use a supported test card number.'},{status:400});const {rows}=await db.query('select * from plans where slug=$1 and enabled=true limit 1',[planSlug]);const plan=rows[0];if(!plan)return NextResponse.json({error:'Plan not found'},{status:404});const amount=Number(plan.price_monthly);const metadata={testCard:`**** **** **** ${card.slice(-4)}`,gateway:'TEST',...config};const oq=await db.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,paid_at,metadata) values($1,$2,'PAID',$3,$4,$5,$6,'test_card',now(),$7::jsonb) returning *`,[user.id,plan.id,amount,plan.currency,plan.template_slug||config.game||'minecraft',serverName,JSON.stringify(metadata)]);const order=oq.rows[0];const invoice=`INV-${Date.now().toString(36).toUpperCase()}-${String(order.id).slice(0,6).toUpperCase()}`;await db.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,paid_at,description) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6)`,[user.id,order.id,invoice,amount,plan.currency,`${plan.name} - ${serverName}`]);try{await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1",[order.id]);const env:any={CRAKHOST_GAME:config.game,CRAKHOST_SOFTWARE:config.software};if(config.game==='minecraft'&&config.software!=='default')env.TYPE=config.software.toUpperCase();const server=await provisionServer({ownerId:user.id,name:serverName,templateSlug:plan.template_slug||config.game||'minecraft',memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),planId:plan.id,location:config.location,environment:env});await db.query("update orders set status='ACTIVE',server_id=$2,provisioned_at=now(),updated_at=now() where id=$1",[order.id,server.id]);return NextResponse.json({ok:true,orderId:order.id,identifier:server.identifier,node:server.node_name,location:server.node_location},{status:201})}catch(e:any){const msg=String(e?.message||e).slice(0,700);await db.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);return NextResponse.json({error:`Payment simulated successfully, but provisioning failed: ${msg}`,orderId:order.id},{status:502})}}catch(e:any){console.error(e);return NextResponse.json({error:e.message||'Test payment failed'},{status:500})}}
+import {NextRequest,NextResponse} from 'next/server';
+import {getCurrentUser} from '@/lib/auth';
+import {db} from '@/lib/db';
+import {preflightProvisioning,provisionServer} from '@/lib/provision';
+
+const successCards=new Set(['4242424242424242','5555555555554444']);
+const declineCards=new Set(['4000000000000002','4000000000009995']);
+
+export async function POST(req:NextRequest){
+  const user=await getCurrentUser();
+  if(!user)return NextResponse.json({error:'Sign in required'},{status:401});
+  try{
+    const b=await req.json();
+    const planSlug=String(b.plan||'');
+    const serverName=String(b.serverName||'My Game Server').trim().slice(0,120);
+    const card=String(b.cardNumber||'').replace(/\D/g,'');
+    const exp=String(b.expiry||'').trim();
+    const cvc=String(b.cvc||'').trim();
+    const config={game:String(b.game||'game').slice(0,30),location:String(b.location||'auto').slice(0,100),software:String(b.software||'default').slice(0,80)};
+    if(!serverName)return NextResponse.json({error:'Server name is required'},{status:400});
+    if(!/^\d{16}$/.test(card)||!/^\d{2}\/\d{2}$/.test(exp)||!/^\d{3,4}$/.test(cvc))return NextResponse.json({error:'Enter valid test card details.'},{status:400});
+    if(declineCards.has(card))return NextResponse.json({error:'Test card declined.'},{status:402});
+    if(!successCards.has(card))return NextResponse.json({error:'Use a supported test card number.'},{status:400});
+
+    const {rows}=await db.query('select * from plans where slug=$1 and enabled=true limit 1',[planSlug]);
+    const plan=rows[0];
+    if(!plan)return NextResponse.json({error:'Plan not found'},{status:404});
+    const templateSlug=plan.template_slug||config.game||'minecraft';
+
+    try{
+      await preflightProvisioning({templateSlug,memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),location:config.location});
+    }catch(e:any){
+      return NextResponse.json({error:`Provisioning unavailable: ${String(e?.message||e)}`},{status:409});
+    }
+
+    const amount=Number(plan.price_monthly);
+    const metadata={testCard:`**** **** **** ${card.slice(-4)}`,gateway:'TEST',...config};
+    const oq=await db.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,paid_at,metadata) values($1,$2,'PAID',$3,$4,$5,$6,'test_card',now(),$7::jsonb) returning *`,[user.id,plan.id,amount,plan.currency,templateSlug,serverName,JSON.stringify(metadata)]);
+    const order=oq.rows[0];
+    const invoice=`INV-${Date.now().toString(36).toUpperCase()}-${String(order.id).slice(0,6).toUpperCase()}`;
+    await db.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,paid_at,description) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6)`,[user.id,order.id,invoice,amount,plan.currency,`${plan.name} - ${serverName}`]);
+
+    try{
+      await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1",[order.id]);
+      const env:any={CRAKHOST_GAME:config.game,CRAKHOST_SOFTWARE:config.software};
+      if(config.game==='minecraft'&&config.software!=='default')env.TYPE=config.software.toUpperCase();
+      const server=await provisionServer({ownerId:user.id,name:serverName,templateSlug,memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),planId:plan.id,location:config.location,environment:env});
+      await db.query("update orders set status='ACTIVE',server_id=$2,node_id=$3,primary_port=$4,provisioned_at=now(),updated_at=now() where id=$1",[order.id,server.id,server.node_id,server.primary_port]);
+      return NextResponse.json({ok:true,orderId:order.id,identifier:server.identifier,node:server.node_name,location:server.node_location},{status:201});
+    }catch(e:any){
+      const msg=String(e?.message||e).slice(0,700);
+      const c=await db.connect();
+      try{
+        await c.query('begin');
+        await c.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);
+        await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[order.id]);
+        await c.query('commit');
+      }catch{
+        await c.query('rollback').catch(()=>{});
+      }finally{
+        c.release();
+      }
+      return NextResponse.json({error:`Test payment succeeded, but provisioning failed and the sandbox invoice was marked refunded: ${msg}`,orderId:order.id},{status:502});
+    }
+  }catch(e:any){
+    console.error(e);
+    return NextResponse.json({error:e.message||'Test payment failed'},{status:500});
+  }
+}
