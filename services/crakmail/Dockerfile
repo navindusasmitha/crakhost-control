@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-    adduser bash ca-certificates gettext-base netcat-openbsd openssl supervisor postgresql-client \
+    adduser bash ca-certificates gettext-base netcat-openbsd openssl procps supervisor postgresql-client \
     postfix postfix-pgsql dovecot-core dovecot-imapd dovecot-lmtpd dovecot-pgsql \
     opendkim opendkim-tools \
  && rm -rf /var/lib/apt/lists/* \
