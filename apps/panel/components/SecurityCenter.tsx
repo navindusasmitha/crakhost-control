@@ -1,14 +1,16 @@
 'use client';
-import {useEffect,useState} from 'react';
+import{useEffect,useState}from'react';
+import{ShieldCheck,KeyRound,Server,CheckCircle2,RefreshCw,LockKeyhole}from'lucide-react';
 export default function SecurityCenter(){
- const [me,setMe]=useState<any>(null); const [data,setData]=useState<any>(null);
- useEffect(()=>{fetch('/api/auth/me').then(r=>r.json()).then(setMe);fetch('/api/security').then(r=>r.json()).then(setData)},[]);
- return <div className="stack"><div className="pageHeader"><div><div className="eyebrow">ACCOUNT SECURITY</div><h1>Security Center</h1><p className="muted">Session, 2FA readiness and infrastructure security status.</p></div></div>
- <div className="grid3">
- <div className="card"><div className="cardTitle">Signed-in account</div><h3>{me?.user?.email||'Loading...'}</h3><p className="muted">Role: {me?.user?.role||'-'}</p></div>
- <div className="card"><div className="cardTitle">Two-factor authentication</div><h3>{data?.totp_enabled?'Enabled':'Ready to configure'}</h3><p className="muted">TOTP database foundation is installed in v0.12. Enrollment UI is staged for the hardened auth release.</p></div>
- <div className="card"><div className="cardTitle">SFTP</div><h3>{data?.sftpEnabled?'Enabled':'Disabled by default'}</h3><p className="muted">Credential model is installed; keep disabled until a dedicated SFTP transport is configured.</p></div>
- </div>
- <div className="card"><div className="cardTitle">Production checklist</div><p className="muted">Rotate SESSION_SECRET and node tokens, enable TLS, use non-default database passwords, revoke exposed API keys, restrict CrakNode ports, and enable 2FA before public launch.</p></div>
- </div>
+ const[me,setMe]=useState<any>(null),[data,setData]=useState<any>(null),[msg,setMsg]=useState('');
+ async function load(){setMsg('');try{const[a,b]=await Promise.all([fetch('/api/auth/me',{cache:'no-store'}),fetch('/api/security',{cache:'no-store'})]);const[ad,bd]=await Promise.all([a.json(),b.json()]);if(!a.ok)throw new Error(ad.error||'Unable to read account');if(!b.ok)throw new Error(bd.error||'Unable to read security state');setMe(ad);setData(bd)}catch(e:any){setMsg(e.message||'Security data unavailable')}}
+ useEffect(()=>{void load()},[]);
+ return <>
+  <section className="opsHero"><div className="heroCopy"><div className="eyebrow">ACCOUNT SECURITY</div><h1>Security <span>center</span></h1><p>Account authentication state and server-access security settings reported by the control plane.</p></div><div className="heroActions"><button className="btn" onClick={load}><RefreshCw size={14}/>Refresh</button></div></section>
+  {msg&&<div className="notice error panelSection">{msg}</div>}
+  <section className="securityGrid panelSection"><SecurityCard icon={<ShieldCheck size={18}/>} title="Signed-in account" value={me?.user?.email||'Loading...'} detail={`Role: ${me?.user?.role||'-'}`} good={!!me?.user}/><SecurityCard icon={<KeyRound size={18}/>} title="Two-factor authentication" value={data?.totp_enabled?'Enabled':'Not enabled'} detail="This reflects the stored TOTP state for your account." good={!!data?.totp_enabled}/><SecurityCard icon={<Server size={18}/>} title="SFTP transport" value={data?.sftpEnabled?'Enabled':'Disabled'} detail="SFTP remains unavailable unless the server transport is explicitly configured." good={!!data?.sftpEnabled}/></section>
+  <section className="card panelSection"><div className="panelSectionHead"><div><h2><LockKeyhole size={14}/> Production security checklist</h2><p>Operational controls that should be verified before exposing infrastructure publicly.</p></div></div><div className="checkList"><Check text="Use a unique SESSION_SECRET and rotate exposed API or node tokens."/><Check text="Terminate public traffic with TLS and keep CrakNode management ports private or firewall-restricted."/><Check text="Use non-default database credentials and keep PostgreSQL/Redis off the public internet."/><Check text="Enable two-factor authentication when enrollment support is configured for your deployment."/><Check text="Review audit events and revoke unused sessions or API credentials during maintenance."/></div></section>
+ </>
 }
+function SecurityCard({icon,title,value,detail,good}:{icon:React.ReactNode;title:string;value:string;detail:string;good:boolean}){return <article className="securityCard"><div className="securityCardTop"><div className="securityIcon">{icon}</div><span className={`statusDot ${good?'active':'unknown'}`}>{good?'active':'review'}</span></div><h3>{title}</h3><div style={{fontWeight:800,color:'#dfe4ef',fontSize:12,marginBottom:5}}>{value}</div><p>{detail}</p></article>}
+function Check({text}:{text:string}){return <div className="checkRow"><CheckCircle2 size={14}/><span>{text}</span></div>}

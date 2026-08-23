@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import {usePathname} from 'next/navigation';
-import {Zap,LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Users,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart,Receipt} from 'lucide-react';
+import {Zap,LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart,Receipt} from 'lucide-react';
 
 type Item={href:string;label:string;icon:any};
 const client:Item[]=[
@@ -34,6 +34,6 @@ export default function Sidebar({staff}:{staff:boolean}){
  return <aside className="sidebar">
    <Link href="/dashboard" className="brand"><div className="brandMark"><Zap size={18}/></div><span>CRAK<span style={{color:'#a78bfa'}}>HOST</span></span></Link>
    <nav className="nav">{group('WORKSPACE',client)}{group('ACCOUNT',account)}{staff&&group('ADMINISTRATION',admin)}</nav>
-   <div className="sidebarBottom"><div className="controlVersion"><div className="online"><span className="pulse"/><div><b>CrakHost Control</b><span>v0.40 · live platform</span></div></div></div></div>
+   <div className="sidebarBottom"><div className="controlVersion"><div className="online"><span className="pulse"/><div><b>CrakHost Control</b><span>production control plane</span></div></div></div></div>
  </aside>
 }
