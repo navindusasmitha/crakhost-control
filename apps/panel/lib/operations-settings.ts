@@ -4,6 +4,9 @@ export async function setNodeDrain(nodeId:string,draining:boolean,userId:string)
   const client=await db.connect();
   try{
     await client.query('begin');
+    await client.query(`select pg_advisory_xact_lock(hashtext($1))`,[`crakhost:node:${nodeId}`]);
+    const node=await client.query('select id from nodes where id=$1 for update',[nodeId]);
+    if(!node.rowCount)throw new Error('Node not found');
     await client.query(`
       insert into system_settings(key,value,updated_by,updated_at)
       values('operations','{}'::jsonb,$1,now())
