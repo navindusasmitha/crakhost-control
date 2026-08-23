@@ -13,7 +13,7 @@ import(
  "time"
 )
 
-const transferVersion="0.25.0"
+const transferVersion="0.44.0"
 
 func init(){
  mux:=http.NewServeMux()
