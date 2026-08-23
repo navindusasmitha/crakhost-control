@@ -18,6 +18,15 @@ type ProvisionInput={
   environment?:Record<string,string>;
 };
 
+type ProvisionPreflightInput={
+  templateSlug:string;
+  memoryMb:number;
+  cpu:number;
+  diskMb:number;
+  nodeId?:string|null;
+  location?:string|null;
+};
+
 type NodeCandidate={
   id:string;
   name:string;
@@ -81,10 +90,10 @@ async function chooseNode(nodeId:string|null|undefined,location:string|null|unde
   const reasons:string[]=[];
   for(const node of nodes){
     const check=await checkNodeRuntimeCapacity(node,disk);
-    if(check.ok)return {node,reasons};
+    if(check.ok)return {node,reasons,check};
     reasons.push(`${node.name}: ${check.reason}`);
   }
-  return {node:null as NodeCandidate|null,reasons};
+  return {node:null as NodeCandidate|null,reasons,check:null};
 }
 
 async function choosePort(client:any,nodeId:string,preferred?:number|null){
@@ -99,13 +108,48 @@ async function choosePort(client:any,nodeId:string,preferred?:number|null){
   throw new Error('No free port available on selected node');
 }
 
-function validateInput(i:ProvisionInput){
-  if(!i.ownerId)throw new Error('Provisioning owner is required');
-  if(!i.name.trim())throw new Error('Server name is required');
+function validateResources(i:{templateSlug:string;memoryMb:number;cpu:number;diskMb:number}){
   if(!i.templateSlug.trim())throw new Error('Server template is required');
   if(!Number.isFinite(i.memoryMb)||i.memoryMb<=0)throw new Error('Invalid server memory allocation');
   if(!Number.isFinite(i.diskMb)||i.diskMb<=0)throw new Error('Invalid server disk allocation');
   if(!Number.isFinite(i.cpu)||i.cpu<=0)throw new Error('Invalid server CPU allocation');
+}
+
+function validateInput(i:ProvisionInput){
+  validateResources(i);
+  if(!i.ownerId)throw new Error('Provisioning owner is required');
+  if(!i.name.trim())throw new Error('Server name is required');
+}
+
+async function template(slug:string){
+  const tq=await db.query('select * from server_templates where slug=$1 and enabled=true limit 1',[slug]);
+  const t=tq.rows[0];
+  if(!t)throw new Error(`Unsupported template: ${slug}`);
+  return t;
+}
+
+function capacityError(i:ProvisionPreflightInput,reasons:string[]){
+  const detail=reasons.length?`: ${reasons.join(' | ')}`:'';
+  return i.location&&i.location!=='auto'
+    ?`No healthy schedulable node in ${i.location} has enough safe capacity${detail}`
+    :`No healthy schedulable node has enough safe capacity${detail}`;
+}
+
+export async function preflightProvisioning(i:ProvisionPreflightInput){
+  validateResources(i);
+  const t=await template(i.templateSlug);
+  const selected=await chooseNode(i.nodeId,i.location,i.memoryMb,i.cpu,i.diskMb);
+  if(!selected.node)throw new Error(capacityError(i,selected.reasons));
+  return {
+    template:{slug:t.slug,image:t.image,internalPort:Number(t.internal_port)},
+    node:{id:selected.node.id,name:selected.node.name,location:selected.node.location},
+    backingStorage:{
+      freeMb:selected.check?.freeDiskMb??null,
+      projectedFreeMb:selected.check?.projectedFreeDiskMb??null,
+      reserveMb:selected.check?.requiredReserveMb??null,
+    },
+    pressureLevel:selected.check?.pressureLevel||'unknown',
+  };
 }
 
 async function reserveServer(node:NodeCandidate,i:ProvisionInput,t:any){
@@ -205,18 +249,10 @@ async function cleanupFailedProvision(node:NodeCandidate,server:any,reason:strin
 
 export async function provisionServer(i:ProvisionInput){
   validateInput(i);
-  const tq=await db.query('select * from server_templates where slug=$1 and enabled=true limit 1',[i.templateSlug]);
-  const t=tq.rows[0];
-  if(!t)throw new Error(`Unsupported template: ${i.templateSlug}`);
-
+  const t=await template(i.templateSlug);
   const selected=await chooseNode(i.nodeId,i.location,i.memoryMb,i.cpu,i.diskMb);
   const node=selected.node;
-  if(!node){
-    const detail=selected.reasons.length?`: ${selected.reasons.join(' | ')}`:'';
-    throw new Error(i.location&&i.location!=='auto'
-      ?`No healthy schedulable node in ${i.location} has enough safe capacity${detail}`
-      :`No healthy schedulable node has enough safe capacity${detail}`);
-  }
+  if(!node)throw new Error(capacityError(i,selected.reasons));
 
   const server=await reserveServer(node,i,t);
   try{
