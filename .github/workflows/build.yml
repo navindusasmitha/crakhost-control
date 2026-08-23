@@ -38,3 +38,32 @@ jobs:
       - name: Compile CrakNode
         working-directory: services/craknode
         run: go test ./...
+
+  crakmail-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts
+        run: |
+          bash -n services/crakmail/entrypoint.sh
+          bash -n services/crakmail/sync-dkim.sh
+          bash -n scripts/check-crakmail-network.sh
+          bash -n scripts/install-crakmail-host.sh
+      - name: Build CrakMail image
+        run: docker build -f services/crakmail/Dockerfile -t crakmail-ci .
+      - name: Validate mail Compose overlay
+        env:
+          POSTGRES_PASSWORD: ci-postgres-password
+          MAIL_DOMAIN: example.com
+          MAIL_HOSTNAME: mail.example.com
+          MAIL_PUBLIC_IP: 203.0.113.10
+          CRAKNODE_TOKEN: ci-node-token
+        run: |
+          cp .env.example .env
+          sed -i 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=ci-postgres-password|' .env
+          sed -i 's|^CRAKNODE_TOKEN=.*|CRAKNODE_TOKEN=ci-node-token|' .env
+          sed -i 's|^MAIL_DOMAIN=.*|MAIL_DOMAIN=example.com|' .env
+          sed -i 's|^MAIL_HOSTNAME=.*|MAIL_HOSTNAME=mail.example.com|' .env
+          sed -i 's|^MAIL_PUBLIC_IP=.*|MAIL_PUBLIC_IP=203.0.113.10|' .env
+          docker compose -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.mail.yml config >/dev/null
