@@ -119,15 +119,32 @@ plugin {
 namespace inbox {
   inbox = yes
   separator = /
-  mailbox Drafts { auto = subscribe special_use = \\Drafts }
-  mailbox Sent { auto = subscribe special_use = \\Sent }
-  mailbox Trash { auto = subscribe special_use = \\Trash }
-  mailbox Junk { auto = subscribe special_use = \\Junk }
+  mailbox Drafts {
+    auto = subscribe
+    special_use = \\Drafts
+  }
+  mailbox Sent {
+    auto = subscribe
+    special_use = \\Sent
+  }
+  mailbox Trash {
+    auto = subscribe
+    special_use = \\Trash
+  }
+  mailbox Junk {
+    auto = subscribe
+    special_use = \\Junk
+  }
 }
 
 service imap-login {
-  inet_listener imap { port = 0 }
-  inet_listener imaps { port = 993 ssl = yes }
+  inet_listener imap {
+    port = 0
+  }
+  inet_listener imaps {
+    port = 993
+    ssl = yes
+  }
   process_min_avail = 1
   service_count = 1
 }
@@ -146,10 +163,10 @@ service lmtp {
   }
 }
 protocol imap {
-  mail_plugins = \$mail_plugins imap_quota
+  mail_plugins = $mail_plugins imap_quota
 }
 protocol lmtp {
-  mail_plugins = \$mail_plugins quota
+  mail_plugins = $mail_plugins quota
   postmaster_address = postmaster@${MAIL_DOMAIN}
 }
 
