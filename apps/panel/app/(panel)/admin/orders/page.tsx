@@ -1,2 +1,2 @@
 import AdminOrders from '../../../../components/AdminOrders';
-export default function AdminOrdersPage(){return <><div className="pageHead"><div><p>BUSINESS CONTROL</p><h1>Orders & Provisioning</h1><p>Track paid orders, failed deployments and provisioned customer servers.</p></div></div><section className="section"><AdminOrders/></section></>}
+export default function AdminOrdersPage(){return <><section className="opsHero"><div className="heroCopy"><div className="eyebrow">BUSINESS CONTROL</div><h1>Orders & <span>provisioning</span></h1><p>Paid orders, failed deployments and provisioned customer servers from the live billing engine.</p></div></section><section className="panelSection"><AdminOrders/></section></>}
