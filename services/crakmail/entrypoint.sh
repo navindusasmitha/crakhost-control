@@ -30,7 +30,7 @@ if [[ ! -r "$TLS_CERT" || ! -r "$TLS_KEY" ]]; then
 fi
 
 mkdir -p /var/mail/vhosts /var/lib/crakmail/dkim /etc/opendkim /run/dovecot /var/spool/postfix/private
-chown -R vmail:vmail /var/mail/vhosts
+chown -R crakmail:crakmail /var/mail/vhosts
 chmod 0750 /var/mail/vhosts
 
 export PGPASSWORD="$POSTGRES_PASSWORD"
@@ -41,7 +41,6 @@ for i in $(seq 1 60); do
   sleep 2
 done
 
-# Bootstrap the first domain from the deployment environment. Later domain changes are managed in the web UI.
 psql -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
   -v domain="$MAIL_DOMAIN" -v hostname="$MAIL_HOSTNAME" -v selector="$DKIM_SELECTOR" <<'SQL'
 INSERT INTO mail_domains(domain,hostname,dkim_selector,enabled,is_primary)
@@ -90,8 +89,8 @@ cat >/etc/dovecot/dovecot.conf <<EOF
 protocols = imap lmtp
 listen = *
 mail_location = maildir:~/Maildir
-mail_uid = vmail
-mail_gid = vmail
+mail_uid = crakmail
+mail_gid = crakmail
 first_valid_uid = 5000
 last_valid_uid = 5000
 
@@ -159,7 +158,6 @@ info_log_path = /dev/stdout
 auth_verbose = no
 EOF
 
-# Configure Postfix through postconf so the packaged master/service defaults remain intact.
 postconf -e "compatibility_level = 3.6"
 postconf -e "myhostname = ${MAIL_HOSTNAME}"
 postconf -e "mydomain = ${MAIL_DOMAIN}"
@@ -171,6 +169,7 @@ postconf -e "smtpd_banner = ${MAIL_HOSTNAME} ESMTP CrakMail"
 postconf -e 'biff = no'
 postconf -e 'append_dot_mydomain = no'
 postconf -e 'readme_directory = no'
+postconf -e 'maillog_file = /dev/stdout'
 postconf -e 'message_size_limit = 52428800'
 postconf -e 'mailbox_size_limit = 0'
 postconf -e 'recipient_delimiter = +'
@@ -202,14 +201,15 @@ postconf -e 'smtp_tls_security_level = may'
 postconf -e 'smtp_tls_loglevel = 1'
 postconf -e 'smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination'
 postconf -e 'smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_non_fqdn_recipient, reject_unknown_recipient_domain, reject_unauth_destination'
-postconf -e 'mynetworks = 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16'
+postconf -e 'mynetworks = 127.0.0.0/8, 172.16.0.0/12'
 postconf -e 'relay_domains ='
 postconf -e 'smtpd_milters = inet:127.0.0.1:8891'
 postconf -e 'non_smtpd_milters = inet:127.0.0.1:8891'
 postconf -e 'milter_default_action = accept'
 postconf -e 'milter_protocol = 6'
 
-# Authenticated STARTTLS submission on 587.
+postconf -M 'smtp/inet=smtp inet n - n - - smtpd'
+
 postconf -M 'submission/inet=submission inet n - n - - smtpd'
 postconf -P 'submission/inet/syslog_name=postfix/submission'
 postconf -P 'submission/inet/smtpd_tls_security_level=encrypt'
@@ -218,7 +218,6 @@ postconf -P 'submission/inet/smtpd_relay_restrictions=permit_sasl_authenticated,
 postconf -P 'submission/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject'
 postconf -P 'submission/inet/milter_macro_daemon_name=ORIGINATING'
 
-# Implicit TLS submission on 465 for clients that prefer it.
 postconf -M 'submissions/inet=submissions inet n - n - - smtpd'
 postconf -P 'submissions/inet/syslog_name=postfix/submissions'
 postconf -P 'submissions/inet/smtpd_tls_wrappermode=yes'
@@ -229,8 +228,8 @@ postconf -P 'submissions/inet/milter_macro_daemon_name=ORIGINATING'
 
 mkdir -p /etc/opendkim
 cat >/etc/opendkim/opendkim.conf <<EOF
-Syslog                  yes
-SyslogSuccess           yes
+Syslog                  no
+SyslogSuccess           no
 LogWhy                   no
 UMask                    007
 Mode                     sv
@@ -251,17 +250,15 @@ chown opendkim:opendkim /run/opendkim
 cat >/var/lib/crakmail/InternalHosts <<'EOF'
 127.0.0.1
 localhost
-10.0.0.0/8
 172.16.0.0/12
-192.168.0.0/16
 EOF
 chown -R opendkim:opendkim /var/lib/crakmail/dkim /var/lib/crakmail/KeyTable /var/lib/crakmail/SigningTable /var/lib/crakmail/InternalHosts
 
-# Generate the first DKIM keys before OpenDKIM starts.
 CRAKMAIL_SYNC_ONCE=1 /usr/local/bin/crakmail-sync-dkim
 
 newaliases || true
 postfix check
+dovecot -n >/dev/null
 
 echo "CrakMail: ${MAIL_HOSTNAME} ready to start (SMTP 25/465/587, IMAPS 993)."
 exec /usr/bin/supervisord -c /etc/supervisord.conf
