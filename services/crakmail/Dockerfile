@@ -1,12 +1,17 @@
-FROM alpine:3.22
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache \
-    bash ca-certificates gettext netcat-openbsd openssl supervisor postgresql-client \
-    postfix postfix-pgsql dovecot dovecot-pgsql dovecot-lmtpd opendkim \
- && addgroup -g 5000 -S vmail \
- && adduser -u 5000 -S -D -H -G vmail vmail \
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    adduser bash ca-certificates gettext-base netcat-openbsd openssl supervisor postgresql-client \
+    postfix postfix-pgsql dovecot-core dovecot-imapd dovecot-lmtpd dovecot-pgsql \
+    opendkim opendkim-tools \
+ && rm -rf /var/lib/apt/lists/* \
+ && addgroup --system --gid 5000 crakmail \
+ && adduser --system --uid 5000 --ingroup crakmail --no-create-home --home /var/mail/vhosts crakmail \
  && mkdir -p /var/mail/vhosts /var/lib/crakmail/dkim /run/dovecot /var/spool/postfix/private \
- && chown -R vmail:vmail /var/mail/vhosts \
+ && chown -R crakmail:crakmail /var/mail/vhosts \
  && chmod 0750 /var/mail/vhosts
 
 COPY services/crakmail/entrypoint.sh /usr/local/bin/crakmail-entrypoint
