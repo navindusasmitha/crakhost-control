@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CrakHost Control v0.49 — Production Documentation</title>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            --bg: #030712;
+            --bg-accent: #0f172a;
+            --panel: #1e293b70;
+            --border: rgba(255, 255, 255, 0.1);
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --primary: #6366f1;
+            --primary-glow: rgba(99, 102, 241, 0.3);
+            --secondary: #ec4899;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --font: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        
+        body {
+            margin: 0;
+            background-color: var(--bg);
+            background-image: 
+                radial-gradient(circle at 0% 0%, var(--primary-glow) 0%, transparent 25%),
+                radial-gradient(circle at 100% 100%, rgba(236, 72, 153, 0.1) 0%, transparent 25%);
+            color: var(--text);
+            font-family: var(--font);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+        /* Navigation */
+        .topbar {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            height: 70px;
+            background: rgba(3, 7, 18, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 0 2rem;
+            z-index: 100;
+            justify-content: space-between;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: white;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+        }
+
+        .brand-logo {
+            width: 40px; height: 40px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border-radius: 10px;
+            display: grid; place-items: center;
+            box-shadow: 0 0 20px var(--primary-glow);
+        }
+
+        .search-box {
+            background: var(--bg-accent);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 400px;
+        }
+
+        .search-box input {
+            background: none; border: none; color: white; width: 100%; outline: none;
+        }
+
+        /* Layout */
+        .layout {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            margin-top: 70px;
+            max-width: 1600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .sidebar {
+            position: sticky;
+            top: 70px;
+            height: calc(100vh - 70px);
+            padding: 2rem 1rem;
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+        }
+
+        .nav-group { margin-bottom: 2rem; }
+        .nav-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: var(--muted);
+            letter-spacing: 1.5px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            padding-left: 12px;
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            color: var(--muted);
+            text-decoration: none;
+            border-radius: 8px;
+            transition: all 0.2s;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+
+        .nav-link:hover, .nav-link.active {
+            background: var(--primary-glow);
+            color: white;
+        }
+
+        /* Content */
+        .content { padding: 3rem; max-width: 1000px; }
+
+        .hero {
+            padding: 4rem 3rem;
+            background: linear-gradient(135deg, #1e1b4b 0%, #030712 100%);
+            border-radius: 24px;
+            border: 1px solid var(--border);
+            position: relative;
+            overflow: hidden;
+            margin-bottom: 3rem;
+        }
+
+        .hero h1 { font-size: 3.5rem; margin: 0; letter-spacing: -2px; line-height: 1; }
+        .hero h1 span { color: var(--primary); }
+        .hero p { color: var(--muted); font-size: 1.1rem; max-width: 600px; }
+
+        .status-bar {
+            display: flex;
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+
+        .status-pill {
+            background: rgba(255,255,255,0.05);
+            padding: 6px 12px;
+            border-radius: 99px;
+            font-size: 12px;
+            border: 1px solid var(--border);
+        }
+
+        /* Sections */
+        .section {
+            background: var(--panel);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 2.5rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .section h2 {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.5rem;
+            margin-top: 0;
+        }
+
+        /* Code Blocks */
+        .code-container {
+            position: relative;
+            background: #000;
+            border-radius: 12px;
+            margin: 1.5rem 0;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            margin: 0;
+            padding: 1.5rem;
+            overflow-x: auto;
+            color: #d1d5db;
+            font-family: 'Fira Code', monospace;
+            font-size: 13px;
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 10px; right: 10px;
+            background: var(--bg-accent);
+            border: 1px solid var(--border);
+            color: var(--muted);
+            padding: 4px 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        /* Checklist */
+        .checklist-container {
+            margin-top: 1rem;
+        }
+
+        .check-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+        }
+
+        .check-item input {
+            width: 18px; height: 18px; accent-color: var(--primary);
+        }
+
+        .progress-container {
+            position: sticky;
+            top: 70px;
+            z-index: 90;
+            background: var(--primary);
+            height: 4px;
+            width: 0%;
+            transition: width 0.3s;
+        }
+
+        /* Command Generator */
+        .generator-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .input-field label {
+            display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; margin-bottom: 5px;
+        }
+
+        .input-field input {
+            width: 100%; background: var(--bg); border: 1px solid var(--border);
+            padding: 10px; border-radius: 8px; color: white;
+        }
+
+        .btn-gen {
+            grid-column: span 2;
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 8px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        /* Tags */
+        .tag {
+            padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 800;
+        }
+        .tag-ok { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+        .tag-warn { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+
+        @media (max-width: 1024px) {
+            .layout { grid-template-columns: 1fr; }
+            .sidebar { display: none; }
+            .search-box { width: 200px; }
+        }
+    </style>
+</head>
+<body>
+
+<header class="topbar">
+    <a href="#" class="brand">
+        <div class="brand-logo"><i data-lucide="shield-check" size="24" color="white"></i></div>
+        <div>
+            <div style="font-size: 18px;">CRAKHOST</div>
+            <div style="font-size: 10px; color: var(--muted); font-weight: 400;">Production Operations</div>
+        </div>
+    </a>
+    <div class="search-box">
+        <i data-lucide="search" size="16" color="#94a3b8"></i>
+        <input type="text" placeholder="Search documentation... (Press '/' to focus)">
+    </div>
+    <div style="display: flex; gap: 10px;">
+        <button class="status-pill" onclick="window.print()"><i data-lucide="printer" size="14"></i> PDF</button>
+    </div>
+</header>
+
+<div class="progress-container" id="progressBar"></div>
+
+<div class="layout">
+    <aside class="sidebar">
+        <div class="nav-group">
+            <div class="nav-label">Getting Started</div>
+            <a href="#overview" class="nav-link active"><i data-lucide="info" size="16"></i> Overview</a>
+            <a href="#requirements" class="nav-link"><i data-lucide="server" size="16"></i> Requirements</a>
+            <a href="#install" class="nav-link"><i data-lucide="terminal" size="16"></i> Installation</a>
+        </div>
+        <div class="nav-group">
+            <div class="nav-label">Configuration</div>
+            <a href="#env" class="nav-link"><i data-lucide="settings-2" size="16"></i> Environment Variables</a>
+            <a href="#ssl" class="nav-link"><i data-lucide="lock" size="16"></i> SSL Setup</a>
+            <a href="#mail" class="nav-link"><i data-lucide="mail" size="16"></i> CrakMail Setup</a>
+        </div>
+        <div class="nav-group">
+            <div class="nav-label">Maintenance</div>
+            <a href="#update" class="nav-link"><i data-lucide="refresh-cw" size="16"></i> Update Procedure</a>
+            <a href="#backup" class="nav-link"><i data-lucide="database" size="16"></i> Backups</a>
+            <a href="#checklist" class="nav-link"><i data-lucide="check-circle" size="16"></i> Go-Live Checklist</a>
+        </div>
+    </aside>
+
+    <main class="content">
+        <section class="hero" id="overview">
+            <span class="tag tag-ok" style="font-size: 12px; margin-bottom: 1rem; display: inline-block;">v0.49.0 STABLE</span>
+            <h1>From zero to <span>production.</span></h1>
+            <p>This manual provides the step-by-step roadmap for deploying the CrakHost Control plane, CrakNode runtime, and integrated mail services on Ubuntu LTS servers.</p>
+            <div class="status-bar">
+                <div class="status-pill">Next.js Panel</div>
+                <div class="status-pill">Go CrakNode</div>
+                <div class="status-pill">PostgreSQL 16</div>
+            </div>
+        </section>
+
+        <section class="section" id="requirements">
+            <h2><i data-lucide="layers"></i> 1. Server Requirements</h2>
+            <p>For a production-ready environment, we recommend the following minimum specs:</p>
+            <div style="overflow-x: auto;">
+                <table style="width: 100%; border-collapse: collapse; margin-top: 1rem;">
+                    <thead>
+                        <tr style="text-align: left; border-bottom: 1px solid var(--border);">
+                            <th style="padding: 12px; color: var(--muted);">Component</th>
+                            <th style="padding: 12px; color: var(--muted);">Minimum</th>
+                            <th style="padding: 12px; color: var(--muted);">Recommended</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr style="border-bottom: 1px solid var(--border);">
+                            <td style="padding: 12px;">CPU</td>
+                            <td style="padding: 12px;">2 vCPU</td>
+                            <td style="padding: 12px;">4+ vCPU</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid var(--border);">
+                            <td style="padding: 12px;">RAM</td>
+                            <td style="padding: 12px;">4 GB</td>
+                            <td style="padding: 12px;">8 GB+</td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid var(--border);">
+                            <td style="padding: 12px;">OS</td>
+                            <td style="padding: 12px;">Ubuntu 22.04</td>
+                            <td style="padding: 12px;">Ubuntu 24.04 LTS</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="section" id="install">
+            <h2><i data-lucide="terminal"></i> 2. One-Command Installation</h2>
+            <p>Run the official installer on a clean Ubuntu VPS. This script installs Docker, Nginx, and configures the CrakHost stack automatically.</p>
+            <div class="code-container">
+                <button class="copy-btn">COPY</button>
+                <pre><code># Download and Run Installer
+curl -fsSL https://raw.githubusercontent.com/navindusasmitha/crakhost-control/main/install.sh -o install.sh
+sudo env PANEL_DOMAIN=panel.yourdomain.com \
+         ACME_EMAIL=admin@yourdomain.com \
+         CRAKHOST_NODE_LOCATION="Default" \
+         bash install.sh</code></pre>
+            </div>
+        </section>
+
+        <section class="section" id="generator">
+            <h2><i data-lucide="cpu"></i> 3. Command Generator</h2>
+            <p>Quickly generate specific commands for your environment.</p>
+            <div class="generator-grid">
+                <div class="input-field">
+                    <label>Domain</label>
+                    <input type="text" id="inDomain" placeholder="panel.example.com">
+                </div>
+                <div class="input-field">
+                    <label>IP Address</label>
+                    <input type="text" id="inIP" placeholder="1.2.3.4">
+                </div>
+                <button class="btn-gen" onclick="genCommands()">Generate Setup Script</button>
+            </div>
+            <div id="genOutput" class="code-container" style="display: none;">
+                <button class="copy-btn">COPY</button>
+                <pre><code id="genText"></code></pre>
+            </div>
+        </section>
+
+        <section class="section" id="checklist">
+            <h2><i data-lucide="check-square"></i> 4. Production Checklist</h2>
+            <p>Ensure your system is fully hardened before going live.</p>
+            <div class="checklist-container" id="checklistItems">
+                <label class="check-item">
+                    <input type="checkbox" onchange="updateProgress()">
+                    <span>Firewall (UFW) configured (80, 443, 22 open only)</span>
+                </label>
+                <label class="check-item">
+                    <input type="checkbox" onchange="updateProgress()">
+                    <span>SSL Certificates (Certbot) verified</span>
+                </label>
+                <label class="check-item">
+                    <input type="checkbox" onchange="updateProgress()">
+                    <span>Admin user promoted in PostgreSQL</span>
+                </label>
+                <label class="check-item">
+                    <input type="checkbox" onchange="updateProgress()">
+                    <span>Automatic backups scheduled to offsite</span>
+                </label>
+                <label class="check-item">
+                    <input type="checkbox" onchange="updateProgress()">
+                    <span>DKIM/SPF records set for CrakMail</span>
+                </label>
+            </div>
+        </section>
+
+        <footer style="text-align: center; color: var(--muted); font-size: 12px; margin-top: 4rem; padding-bottom: 2rem;">
+            &copy; 2024 CrakHost Control. Documentation generated for v0.49.0 stable.
+        </footer>
+    </main>
+</div>
+
+<script>
+    // Lucide Icons
+    lucide.createIcons();
+
+    // Progress Bar Logic
+    function updateProgress() {
+        const checkboxes = document.querySelectorAll('#checklistItems input[type="checkbox"]');
+        const checked = Array.from(checkboxes).filter(c => c.checked).length;
+        const progress = (checked / checkboxes.length) * 100;
+        document.getElementById('progressBar').style.width = progress + '%';
+    }
+
+    // Command Generator
+    function genCommands() {
+        const domain = document.getElementById('inDomain').value || 'panel.example.com';
+        const ip = document.getElementById('inIP').value || '1.2.3.4';
+        const output = document.getElementById('genOutput');
+        const text = document.getElementById('genText');
+
+        text.textContent = `# 1. Update PTR Record at Provider to: ${domain}
+# 2. Run SSL Setup
+sudo certbot --nginx -d ${domain}
+
+# 3. Verify Connectivity
+curl -I https://${domain}
+
+# 4. Check Node Logs
+sudo docker logs crakhost-control-craknode-1 --tail 50`;
+        
+        output.style.display = 'block';
+    }
+
+    // Copy Button Functionality
+    document.querySelectorAll('.copy-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const code = btn.nextElementSibling.innerText;
+            navigator.clipboard.writeText(code);
+            btn.innerText = 'COPIED!';
+            setTimeout(() => btn.innerText = 'COPY', 2000);
+        });
+    });
+
+    // Keyboard Shortcut (/)
+    document.addEventListener('keydown', (e) => {
+        if (e.key === '/') {
+            e.preventDefault();
+            document.querySelector('.search-box input').focus();
+        }
+    });
+
+    // Sidebar Active State on Scroll
+    window.addEventListener('scroll', () => {
+        let current = '';
+        document.querySelectorAll('section').forEach(section => {
+            const sectionTop = section.offsetTop;
+            if (pageYOffset >= sectionTop - 100) {
+                current = section.getAttribute('id');
+            }
+        });
+
+        document.querySelectorAll('.nav-link').forEach(link => {
+            link.classList.remove('active');
+            if (link.getAttribute('href').includes(current)) {
+                link.classList.add('active');
+            }
+        });
+    });
+</script>
+
+</body>
+</html>
