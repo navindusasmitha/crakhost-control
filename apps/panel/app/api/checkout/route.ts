@@ -14,40 +14,28 @@ export async function POST(req:NextRequest){
   const slug=String(body.plan||'');
   const serverName=String(body.serverName||'My Server').trim().slice(0,120);
   if(!serverName)return NextResponse.json({error:'Server name is required'},{status:400});
-  const config={
-    game:String(body.game||'game').slice(0,30),
-    location:String(body.location||'auto').slice(0,100),
-    software:String(body.software||'default').slice(0,80),
-  };
+  const config={game:String(body.game||'game').slice(0,30),location:String(body.location||'auto').slice(0,100),software:String(body.software||'default').slice(0,80)};
 
   const pq=await db.query('select * from plans where slug=$1 and enabled=true limit 1',[slug]);
   const plan=pq.rows[0];
   if(!plan)return NextResponse.json({error:'Plan not found'},{status:404});
   const templateSlug=plan.template_slug||config.game||'minecraft';
 
-  try{
-    await preflightProvisioning({
-      templateSlug,
-      memoryMb:Number(plan.memory_mb),
-      cpu:Number(plan.cpu_limit),
-      diskMb:Number(plan.disk_mb),
-      location:config.location,
-    });
-  }catch(e:any){
-    return NextResponse.json({error:`Provisioning unavailable: ${String(e?.message||e)}`},{status:409});
-  }
+  try{await preflightProvisioning({templateSlug,memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),location:config.location})}
+  catch(e:any){return NextResponse.json({error:`Provisioning unavailable: ${String(e?.message||e)}`},{status:409})}
 
   const price=Number(plan.price_monthly);
   const credits=Number(user.credits||0);
   if(credits<price){
     const oq=await db.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,metadata) values($1,$2,'PENDING',$3,$4,$5,$6,'wallet',$7::jsonb) returning id`,[user.id,plan.id,price,plan.currency,templateSlug,serverName,JSON.stringify({...config,reason:'INSUFFICIENT_WALLET'})]);
     const number=`INV-${Date.now().toString(36).toUpperCase()}-${String(oq.rows[0].id).slice(0,6).toUpperCase()}`;
-    await db.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,description) values($1,$2,$3,$4,$5,'DUE',now()+interval '1 day',$6)`,[user.id,oq.rows[0].id,number,price,plan.currency,`${plan.name} - ${serverName}`]);
+    const description=`${plan.name} - ${serverName}`;const dueDate=new Date(Date.now()+24*60*60*1000);
+    await db.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,description) values($1,$2,$3,$4,$5,'DUE',now()+interval '1 day',$6)`,[user.id,oq.rows[0].id,number,price,plan.currency,description]);
+    await sendTemplateEmail('invoice_due',user.email,{name:user.name,invoice_number:number,description,currency:plan.currency,amount:price.toFixed(2),due_date:dueDate.toLocaleString('en-GB',{timeZone:'UTC',dateStyle:'medium',timeStyle:'short'})+' UTC',billing_url:appBase()?`${appBase()}/billing`:''}).catch(e=>console.warn('[mail] invoice due delivery failed',e?.message||e));
     return NextResponse.json({error:`Wallet balance is ${plan.currency} ${credits.toFixed(2)}. ${plan.currency} ${price.toFixed(2)} is required. Order created as pending.`,orderId:oq.rows[0].id},{status:402});
   }
 
-  const client=await db.connect();
-  let order:any;let invoiceNumber='';
+  const client=await db.connect();let order:any;let invoiceNumber='';
   try{
     await client.query('begin');
     const locked=await client.query('select credits from users where id=$1 for update',[user.id]);
@@ -59,17 +47,12 @@ export async function POST(req:NextRequest){
     invoiceNumber=`INV-${Date.now().toString(36).toUpperCase()}-${String(order.id).slice(0,6).toUpperCase()}`;
     await client.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,paid_at,description) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6)`,[user.id,order.id,invoiceNumber,price,plan.currency,`${plan.name} - ${serverName}`]);
     await client.query('commit');
-  }catch(e:any){
-    await client.query('rollback').catch(()=>{});
-    client.release();
-    return NextResponse.json({error:e.message||'Checkout failed'},{status:409});
-  }
+  }catch(e:any){await client.query('rollback').catch(()=>{});client.release();return NextResponse.json({error:e.message||'Checkout failed'},{status:409})}
   client.release();
 
   try{
     await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1",[order.id]);
-    const env:any={CRAKHOST_GAME:config.game,CRAKHOST_SOFTWARE:config.software};
-    if(config.game==='minecraft'&&config.software!=='default')env.TYPE=config.software.toUpperCase();
+    const env:any={CRAKHOST_GAME:config.game,CRAKHOST_SOFTWARE:config.software};if(config.game==='minecraft'&&config.software!=='default')env.TYPE=config.software.toUpperCase();
     const server=await provisionServer({ownerId:user.id,name:serverName,templateSlug,memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),planId:plan.id,location:config.location,environment:env});
     await db.query("update orders set status='ACTIVE',server_id=$2,node_id=$3,primary_port=$4,provisioned_at=now(),updated_at=now() where id=$1",[order.id,server.id,server.node_id,server.primary_port]);
     await db.query("insert into notifications(user_id,title,body,kind) values($1,'Server ready',$2,'success')",[user.id,`${serverName} has been provisioned on ${server.node_name}${server.node_location?` (${server.node_location})`:''}.`]);
@@ -80,8 +63,7 @@ export async function POST(req:NextRequest){
     ]);
     return NextResponse.json({ok:true,orderId:order.id,identifier:server.identifier,node:server.node_name,location:server.node_location},{status:201});
   }catch(e:any){
-    const msg=String(e?.message||e).slice(0,700);
-    const c=await db.connect();
+    const msg=String(e?.message||e).slice(0,700);const c=await db.connect();let refunded=false;
     try{
       await c.query('begin');
       await c.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);
@@ -89,12 +71,9 @@ export async function POST(req:NextRequest){
       await c.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'REFUND',$3,'order',$4)`,[user.id,price,`Automatic refund: ${plan.name} provisioning failed`,order.id]);
       await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[order.id]);
       await c.query("insert into notifications(user_id,title,body,kind) values($1,'Provisioning failed',$2,'error')",[user.id,`${serverName} could not be provisioned. Your wallet payment was refunded automatically.`]);
-      await c.query('commit');
-    }catch{
-      await c.query('rollback').catch(()=>{});
-    }finally{
-      c.release();
-    }
+      await c.query('commit');refunded=true;
+    }catch{await c.query('rollback').catch(()=>{})}finally{c.release()}
+    if(refunded)await sendTemplateEmail('payment_refunded',user.email,{name:user.name,server_name:serverName,currency:plan.currency,amount:price.toFixed(2),reason:msg,billing_url:appBase()?`${appBase()}/billing`:''}).catch(e2=>console.warn('[mail] refund delivery failed',e2?.message||e2));
     return NextResponse.json({error:`Provisioning failed and wallet was refunded: ${msg}`,orderId:order.id},{status:502});
   }
 }
