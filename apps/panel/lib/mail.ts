@@ -3,9 +3,11 @@ import net from 'node:net';
 import tls from 'node:tls';
 import {db} from './db';
 
+const DEFAULT_LOGO_URL='https://i.ibb.co/pv5zb3Q5/logo-Photoroom.png';
+
 type MailConfig={
   enabled:boolean;host:string;port:number;encryption:'STARTTLS'|'SSL_TLS'|'NONE';username:string;password:string;
-  fromName:string;fromEmail:string;replyTo:string;rejectUnauthorized:boolean;
+  fromName:string;fromEmail:string;replyTo:string;rejectUnauthorized:boolean;logoUrl:string;
 };
 type TemplateRow={key:string;name:string;description:string;subject:string;html_body:string;text_body:string;variables:string[];enabled:boolean};
 type Vars=Record<string,string|number|null|undefined>;
@@ -33,7 +35,7 @@ export function decryptMailSecret(value:string){
 export async function getMailConfig():Promise<MailConfig>{
   const q=await db.query(`select * from mail_settings where id=1 limit 1`);const s=q.rows[0];
   if(!s)throw new Error('SMTP settings are not initialized; run database migrations');
-  return {enabled:!!s.enabled,host:String(s.host||''),port:Number(s.port||587),encryption:s.encryption||'STARTTLS',username:String(s.username||''),password:decryptMailSecret(String(s.password_cipher||'')),fromName:String(s.from_name||'CrakHost'),fromEmail:String(s.from_email||''),replyTo:String(s.reply_to||''),rejectUnauthorized:s.reject_unauthorized!==false};
+  return {enabled:!!s.enabled,host:String(s.host||''),port:Number(s.port||587),encryption:s.encryption||'STARTTLS',username:String(s.username||''),password:decryptMailSecret(String(s.password_cipher||'')),fromName:String(s.from_name||'CrakHost'),fromEmail:String(s.from_email||''),replyTo:String(s.reply_to||''),rejectUnauthorized:s.reject_unauthorized!==false,logoUrl:String(s.logo_url||DEFAULT_LOGO_URL)};
 }
 
 function cleanHeader(v:string){return v.replace(/[\r\n]+/g,' ').trim()}
@@ -41,6 +43,10 @@ function encodedHeader(v:string){const clean=cleanHeader(v);return /[^\x20-\x7E]
 function escapeHtml(v:unknown){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]||c))}
 function render(source:string,vars:Vars,html=false){return source.replace(/{{\s*([a-zA-Z0-9_.-]+)\s*}}/g,(_,key)=>html?escapeHtml(vars[key]):String(vars[key]??''))}
 function appBase(){return (process.env.APP_URL||process.env.PANEL_URL||process.env.PUBLIC_URL||'').replace(/\/$/,'')}
+function brandEnvelope(inner:string,config:MailConfig){
+  const logo=/^https?:\/\//i.test(config.logoUrl)?config.logoUrl:DEFAULT_LOGO_URL;
+  return `<div style="margin:0;padding:32px 16px;background:#080a12;color:#e9ecf4;font-family:Arial,Helvetica,sans-serif"><div style="max-width:680px;margin:0 auto"><div style="text-align:center;padding:4px 0 22px"><img src="${escapeHtml(logo)}" alt="CrakHost" style="max-width:190px;max-height:64px;width:auto;height:auto;display:inline-block;border:0"/></div><div style="background:#121622;border:1px solid #252c40;border-radius:18px;padding:28px;color:#e9ecf4;line-height:1.6">${inner}</div><div style="padding:18px 8px 0;text-align:center;color:#768198;font-size:12px">CrakHost · Secure hosting control · <a href="${escapeHtml(appBase()||'#')}" style="color:#9b87ff;text-decoration:none">Open control panel</a></div></div></div>`;
+}
 
 function readResponse(socket:net.Socket|tls.TLSSocket,timeoutMs=12000):Promise<{code:number,text:string}>{
   return new Promise((resolve,reject)=>{
@@ -98,7 +104,7 @@ async function logDelivery(templateKey:string|null,recipient:string,subject:stri
 export async function sendDirectEmail(to:string,subject:string,html:string,text=''){
   const config=await getMailConfig();
   if(!config.enabled){await logDelivery(null,to,subject,'SKIPPED','','SMTP delivery is disabled');return {sent:false,skipped:true,reason:'SMTP delivery is disabled'}}
-  try{const out=await smtpSend(config,to,subject,html,text);await logDelivery(null,to,subject,'SENT',out.messageId,'');return {sent:true,...out}}
+  try{const out=await smtpSend(config,to,subject,brandEnvelope(html,config),text);await logDelivery(null,to,subject,'SENT',out.messageId,'');return {sent:true,...out}}
   catch(e:any){const error=String(e?.message||e);await logDelivery(null,to,subject,'FAILED','',error);throw e}
 }
 
@@ -106,8 +112,8 @@ export async function sendTemplateEmail(templateKey:string,to:string,vars:Vars={
   const config=await getMailConfig();
   const tq=await db.query(`select * from email_templates where key=$1 limit 1`,[templateKey]);const t=tq.rows[0] as TemplateRow|undefined;
   if(!t)throw new Error(`Email template not found: ${templateKey}`);
-  const merged:Vars={panel_url:appBase()||'',billing_url:appBase()?`${appBase()}/billing`:'',support_url:appBase()?`${appBase()}/support`:'',...vars};
-  const subject=render(String(t.subject||''),merged,false);const html=render(String(t.html_body||''),merged,true);const text=render(String(t.text_body||''),merged,false);
+  const merged:Vars={panel_url:appBase()||'',billing_url:appBase()?`${appBase()}/billing`:'',support_url:appBase()?`${appBase()}/support`:'',logo_url:config.logoUrl,...vars};
+  const subject=render(String(t.subject||''),merged,false);const html=brandEnvelope(render(String(t.html_body||''),merged,true),config);const text=render(String(t.text_body||''),merged,false);
   if(!config.enabled||!t.enabled){const reason=!config.enabled?'SMTP delivery is disabled':'Email template is disabled';await logDelivery(templateKey,to,subject,'SKIPPED','',reason);return {sent:false,skipped:true,reason}}
   try{const out=await smtpSend(config,to,subject,html,text);await logDelivery(templateKey,to,subject,'SENT',out.messageId,'');return {sent:true,...out}}
   catch(e:any){const error=String(e?.message||e);await logDelivery(templateKey,to,subject,'FAILED','',error);throw e}
@@ -115,10 +121,10 @@ export async function sendTemplateEmail(templateKey:string,to:string,vars:Vars={
 
 export async function mailAdminSnapshot(){
   const [s,t,l]=await Promise.all([
-    db.query(`select enabled,host,port,encryption,username,password_cipher,from_name,from_email,reply_to,reject_unauthorized,updated_at from mail_settings where id=1 limit 1`),
+    db.query(`select enabled,host,port,encryption,username,password_cipher,from_name,from_email,reply_to,reject_unauthorized,logo_url,updated_at from mail_settings where id=1 limit 1`),
     db.query(`select key,name,description,subject,html_body,text_body,variables,enabled,system_template,updated_at from email_templates order by name`),
     db.query(`select id,template_key,recipient,subject,status,message_id,error,created_at from email_delivery_logs order by created_at desc limit 50`),
   ]);
   const row=s.rows[0]||{};
-  return {settings:{enabled:!!row.enabled,host:row.host||'',port:Number(row.port||587),encryption:row.encryption||'STARTTLS',username:row.username||'',passwordConfigured:!!row.password_cipher,fromName:row.from_name||'CrakHost',fromEmail:row.from_email||'',replyTo:row.reply_to||'',rejectUnauthorized:row.reject_unauthorized!==false,updatedAt:row.updated_at||null},templates:t.rows,logs:l.rows};
+  return {settings:{enabled:!!row.enabled,host:row.host||'',port:Number(row.port||587),encryption:row.encryption||'STARTTLS',username:row.username||'',passwordConfigured:!!row.password_cipher,fromName:row.from_name||'CrakHost',fromEmail:row.from_email||'',replyTo:row.reply_to||'',rejectUnauthorized:row.reject_unauthorized!==false,logoUrl:row.logo_url||DEFAULT_LOGO_URL,updatedAt:row.updated_at||null},templates:t.rows,logs:l.rows};
 }
