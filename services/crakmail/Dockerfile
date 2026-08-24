@@ -16,8 +16,9 @@ RUN apt-get update \
 
 COPY services/crakmail/entrypoint.sh /usr/local/bin/crakmail-entrypoint
 COPY services/crakmail/sync-dkim.sh /usr/local/bin/crakmail-sync-dkim
+COPY services/crakmail/postfix-runtime.sh /usr/local/bin/crakmail-postfix-runtime
 COPY services/crakmail/supervisord.conf /etc/supervisord.conf
-RUN chmod 0755 /usr/local/bin/crakmail-entrypoint /usr/local/bin/crakmail-sync-dkim
+RUN chmod 0755 /usr/local/bin/crakmail-entrypoint /usr/local/bin/crakmail-sync-dkim /usr/local/bin/crakmail-postfix-runtime
 
 VOLUME ["/var/mail/vhosts","/var/lib/crakmail"]
 EXPOSE 25 465 587 993
