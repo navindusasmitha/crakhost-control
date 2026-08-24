@@ -9,7 +9,7 @@ const LOGO='https://i.ibb.co/pv5zb3Q5/logo-Photoroom.png';
 export default async function Home(){
   const [planQ,nodeQ,serverQ]=await Promise.all([
     db.query(`select id,slug,name,description,memory_mb,cpu_limit,disk_mb,price_monthly,currency,template_slug,featured from plans where enabled=true order by sort_order,price_monthly`),
-    db.query(`select id,name,location,capacity_cpu,capacity_memory_mb,capacity_disk_mb,last_seen_at,agent_version from nodes where enabled=true order by last_seen_at desc nulls last,name limit 8`),
+    db.query(`select id,name,location,capacity_cpu,capacity_memory_mb,capacity_disk_mb,last_seen_at,agent_version from nodes where enabled=true order by last_seen_at desc nulls last,name`),
     db.query(`select count(*)::int count from servers where status<>'deleted'`),
   ]);
   const plans=planQ.rows,nodes=nodeQ.rows,servers=Number(serverQ.rows[0]?.count||0);
