@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.54.0"
+VERSION = "0.55.3"
 SOCKET_PATH = Path(os.getenv("CRAKHOST_UPDATER_SOCKET", "/run/crakhost-updater/updater.sock"))
 STATE_PATH = Path(os.getenv("CRAKHOST_UPDATER_STATE", "/var/lib/crakhost-updater/state.json"))
 HISTORY_PATH = Path(os.getenv("CRAKHOST_UPDATER_HISTORY", "/var/lib/crakhost-updater/history.json"))
@@ -42,6 +42,8 @@ def default_state():
         "finished_at": None,
         "exit_code": None,
         "agent_version": VERSION,
+        "storage_before": None,
+        "cleanup_summary": None,
     }
 
 
@@ -128,6 +130,18 @@ def watch_process(proc, job_id):
         state["finished_at"] = now_iso()
         state["exit_code"] = code
         state["pid"] = None
+        if state.get("job_kind") == "maintenance" and code == 0:
+            after = storage_snapshot()
+            before = state.get("storage_before") or {}
+            if after:
+                state["cleanup_summary"] = {
+                    "disk_used_before_bytes": before.get("disk_used_bytes"),
+                    "disk_used_after_bytes": after.get("disk_used_bytes"),
+                    "disk_reclaimed_bytes": max(0, int(before.get("disk_used_bytes") or 0) - int(after.get("disk_used_bytes") or 0)),
+                    "docker_reclaimable_before_bytes": before.get("docker_reclaimable_bytes"),
+                    "docker_reclaimable_after_bytes": after.get("docker_reclaimable_bytes"),
+                    "finished_at": state.get("finished_at"),
+                }
         save_state(state)
         append_history({
             "job_id": state.get("job_id"),
@@ -136,6 +150,7 @@ def watch_process(proc, job_id):
             "started_at": state.get("started_at"),
             "finished_at": state.get("finished_at"),
             "exit_code": code,
+            "cleanup_summary": state.get("cleanup_summary"),
         })
     append_log(f"[Updater Agent] Job {job_id} finished with exit code {code}.")
 
@@ -180,6 +195,8 @@ def start_job(kind, script_path, extra_env=None):
             "finished_at": None,
             "exit_code": None,
             "agent_version": VERSION,
+            "storage_before": storage_snapshot() if kind == "maintenance" else None,
+            "cleanup_summary": None,
         }
         save_state(state)
         threading.Thread(target=watch_process, args=(proc, job_id), daemon=True).start()
@@ -270,6 +287,22 @@ def parse_size_bytes(raw):
     return int(value * factors.get(unit, 1))
 
 
+def storage_snapshot():
+    try:
+        disk = shutil.disk_usage("/")
+    except Exception:
+        return None
+    docker_usage, _ = docker_df()
+    reclaimable_bytes = sum(parse_size_bytes(item.get("Reclaimable")) for item in docker_usage)
+    return {
+        "disk_total_bytes": disk.total,
+        "disk_used_bytes": disk.used,
+        "disk_free_bytes": disk.free,
+        "docker_reclaimable_bytes": reclaimable_bytes,
+        "captured_at": now_iso(),
+    }
+
+
 def classify_service(service, raw_status):
     service_name = str(service or "").lower()
     status = str(raw_status or "")
@@ -335,8 +368,12 @@ def collect_metrics():
             warnings.append(f"Service {service.get('service')} reports {service.get('raw_status') or service.get('status')}.")
             critical = True
     reclaimable_bytes = sum(parse_size_bytes(item.get("Reclaimable")) for item in docker_usage)
-    if reclaimable_bytes >= 5 * 1024**3:
-        warnings.append("Docker has more than 5 GiB reclaimable; Safe cleanup is recommended.")
+    cleanup_recommended = (
+        reclaimable_bytes >= 20 * 1024**3
+        or (reclaimable_bytes >= 8 * 1024**3 and ((disk_percent or 0) >= 70 or disk.free < 20 * 1024**3))
+    )
+    if cleanup_recommended:
+        warnings.append("Docker storage pressure is elevated; Safe cleanup is recommended.")
     if docker_error:
         warnings.append(f"Docker storage metrics unavailable: {docker_error}")
     if services_error:
@@ -367,6 +404,7 @@ def collect_metrics():
         "uptime_seconds": uptime,
         "docker_df": docker_usage,
         "docker_reclaimable_bytes": reclaimable_bytes,
+        "docker_cleanup_recommended": cleanup_recommended,
         "services": services,
         "warnings": warnings,
         "collected_at": now_iso(),
@@ -374,7 +412,7 @@ def collect_metrics():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CrakHostUpdater/0.54"
+    server_version = f"CrakHostUpdater/{VERSION}"
 
     def log_message(self, *_):
         return
