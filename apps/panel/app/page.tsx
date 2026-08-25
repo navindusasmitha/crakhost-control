@@ -4,7 +4,7 @@ import {db} from '@/lib/db';
 import MarketingNav from '@/components/MarketingNav';
 
 export const dynamic='force-dynamic';
-const LOGO='https://i.ibb.co/pv5zb3Q5/logo-Photoroom.png';
+const LOGO='https://i.ibb.co/sv3BkwyS/logo-Photoroom.png';
 
 export default async function Home(){
   const [planQ,nodeQ,serverQ]=await Promise.all([
