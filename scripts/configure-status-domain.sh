@@ -17,6 +17,9 @@ server {
     listen [::]:80;
     server_name $DOMAIN;
 
+    # The status hostname is intentionally isolated from the authenticated
+    # control panel. Only the public status document, its public JSON feed and
+    # Next.js static assets are reachable through this virtual host.
     location = / {
         proxy_pass http://127.0.0.1:4310/status;
         proxy_http_version 1.1;
@@ -26,16 +29,32 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-    location / {
+    location = /api/public/status {
+        proxy_pass http://127.0.0.1:4310/api/public/status;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location ^~ /_next/ {
         proxy_pass http://127.0.0.1:4310;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 120s;
+        expires 1h;
+    }
+
+    location = /favicon.ico {
+        proxy_pass http://127.0.0.1:4310/favicon.ico;
+        proxy_set_header Host \$host;
+    }
+
+    location / {
+        return 404;
     }
 
     add_header X-Content-Type-Options "nosniff" always;
@@ -47,7 +66,7 @@ ln -sf /etc/nginx/sites-available/crakhost-status /etc/nginx/sites-enabled/crakh
 if ! nginx -t; then echo "[CrakHost] Status nginx configuration failed validation." >&2; exit 1; fi
 systemctl reload nginx
 
-echo "[CrakHost] Public status HTTP proxy ready for $DOMAIN."
+echo "[CrakHost] Isolated public status HTTP proxy ready for $DOMAIN."
 if [ "$AUTO_TLS" = "true" ] && command -v certbot >/dev/null 2>&1 && [ -n "$EMAIL" ]; then
   if certbot certificates 2>/dev/null | grep -Fq "Domains: $DOMAIN"; then
     echo "[CrakHost] HTTPS certificate for $DOMAIN already exists."
