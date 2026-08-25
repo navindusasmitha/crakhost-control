@@ -6,15 +6,20 @@ DIR="${CRAKHOST_DIR:-/opt/crakhost}"
 cd "$DIR"
 [ -f .env ] || { echo "[CrakHost] Missing $DIR/.env" >&2; exit 1; }
 
-OLD_SHA="$(git rev-parse HEAD)"
+# Production files may intentionally be owned by the SSH/deploy account while
+# the restricted updater runs as root. Trust only this exact repository path
+# for each Git invocation instead of changing global Git trust settings.
+GIT=(git -c "safe.directory=$DIR")
+
+OLD_SHA="$("${GIT[@]}" rev-parse HEAD)"
 BACKUP_ROOT="${CRAKHOST_BACKUP_ROOT:-/var/backups/crakhost}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="$BACKUP_ROOT/$STAMP"
 SOURCE="${CRAKHOST_UPDATE_SOURCE:-terminal}"
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
+if ! "${GIT[@]}" diff --quiet || ! "${GIT[@]}" diff --cached --quiet; then
   echo "[CrakHost] Tracked source files have local changes. Commit/stash them before updating." >&2
-  git status --short >&2 || true
+  "${GIT[@]}" status --short >&2 || true
   exit 1
 fi
 
@@ -68,10 +73,10 @@ fi
 
 echo "[CrakHost] Backup ready: $BACKUP_DIR"
 echo "[CrakHost] Stage 2/7: fetching latest main branch..."
-git fetch --prune origin main
-git checkout -q main
-git reset --hard origin/main
-NEW_SHA="$(git rev-parse HEAD)"
+"${GIT[@]}" fetch --prune origin main
+"${GIT[@]}" checkout -q main
+"${GIT[@]}" reset --hard origin/main
+NEW_SHA="$("${GIT[@]}" rev-parse HEAD)"
 
 if [ "$OLD_SHA" = "$NEW_SHA" ]; then
   echo "[CrakHost] Source is already on latest main ($NEW_SHA); re-applying production services."
@@ -84,7 +89,7 @@ CRAKHOST_UPDATE_SOURCE="$SOURCE" bash scripts/install-updater-agent.sh
 
 rollback_code(){
   echo "[CrakHost] Restoring application source to $OLD_SHA" >&2
-  git reset --hard "$OLD_SHA"
+  "${GIT[@]}" reset --hard "$OLD_SHA"
   "${COMPOSE[@]}" build panel || true
   "${COMPOSE[@]}" up -d postgres redis || true
   "${COMPOSE[@]}" up -d --no-deps --force-recreate craknode || true
@@ -97,7 +102,7 @@ rollback_code(){
 echo "[CrakHost] Stage 4/7: building panel..."
 if ! "${COMPOSE[@]}" build panel; then
   echo "[CrakHost] Candidate panel build failed." >&2
-  git reset --hard "$OLD_SHA"
+  "${GIT[@]}" reset --hard "$OLD_SHA"
   exit 1
 fi
 
