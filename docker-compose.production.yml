@@ -20,6 +20,8 @@ services:
     env_file: .env
     ports:
       - "127.0.0.1:4310:4310"
+    volumes:
+      - /run/crakhost-updater:/run/crakhost-updater:ro
     depends_on:
       postgres:
         condition: service_healthy

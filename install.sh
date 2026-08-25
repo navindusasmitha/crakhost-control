@@ -14,7 +14,7 @@ if [ -d "$DIR/.git" ] && [ -f "$DIR/.env" ]; then
 fi
 
 apt-get update
-apt-get install -y ca-certificates curl git openssl nginx certbot python3-certbot-nginx
+apt-get install -y ca-certificates curl git openssl nginx certbot python3 python3-certbot-nginx
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 docker compose version >/dev/null
 
@@ -35,6 +35,7 @@ SESSION="$(openssl rand -hex 32)"
 NODE_TOKEN="$(openssl rand -hex 32)"
 REG_TOKEN="$(openssl rand -hex 32)"
 CRON_SECRET="$(openssl rand -hex 32)"
+DEPLOY_TOKEN="$(openssl rand -hex 32)"
 
 DOMAIN="${PANEL_DOMAIN:-}"
 EMAIL="${ACME_EMAIL:-}"
@@ -85,6 +86,7 @@ set_env CRAKNODE_NAME "$NODE_NAME"
 set_env CRAKNODE_LOCATION "$NODE_LOCATION"
 set_env CRAKNODE_PUBLIC_URL "http://craknode:8088"
 set_env CRAKHOST_CRON_SECRET "$CRON_SECRET"
+set_env CRAKHOST_DEPLOY_TOKEN "$DEPLOY_TOKEN"
 set_env PANEL_DOMAIN "$DOMAIN"
 set_env ACME_EMAIL "$EMAIL"
 set_env CRAKHOST_GITHUB_REPO "$REPO"
@@ -119,6 +121,9 @@ nginx -t
 systemctl enable --now nginx
 systemctl reload nginx
 
+# Install the narrow root-owned Unix-socket updater before the panel starts.
+CRAKHOST_UPDATE_SOURCE=terminal bash scripts/install-updater-agent.sh
+
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.production.yml)
 echo "[CrakHost] Building and starting services..."
 if ! "${COMPOSE[@]}" up -d --build --remove-orphans; then
@@ -128,7 +133,7 @@ if ! "${COMPOSE[@]}" up -d --build --remove-orphans; then
 fi
 
 PANEL_READY=0
-for i in $(seq 1 90); do
+for _ in $(seq 1 90); do
   if curl -fsS http://127.0.0.1:4310/api/health >/dev/null 2>&1; then PANEL_READY=1; break; fi
   sleep 2
 done
@@ -180,7 +185,7 @@ fi
 systemctl reload nginx
 
 echo
-echo "[CrakHost] CrakHost Control v0.51 installation complete."
+echo "[CrakHost] CrakHost Control v0.52 installation complete."
 echo "Panel health: http://127.0.0.1:4310/api/health"
 if [ "$TLS_READY" = "true" ]; then
   echo "Public panel: https://$DOMAIN"
@@ -189,5 +194,6 @@ else
 fi
 echo "Admin email: $ADMIN_EMAIL"
 echo "Node: $NODE_NAME ($NODE_LOCATION)"
-echo "Update later: sudo $DIR/scripts/update-production.sh"
+echo "In-panel updater: enabled"
+echo "Manual fallback update: sudo $DIR/scripts/update-production.sh"
 echo "Status: cd $DIR && docker compose -f docker-compose.yml -f docker-compose.production.yml ps"

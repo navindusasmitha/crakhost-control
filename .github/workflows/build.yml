@@ -97,15 +97,41 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Validate shell scripts
+      - name: Validate host and mail scripts
         run: |
           bash -n install.sh
           bash -n scripts/update-production.sh
+          bash -n scripts/install-updater-agent.sh
           bash -n scripts/repair-production.sh
           bash -n services/crakmail/entrypoint.sh
           bash -n services/crakmail/sync-dkim.sh
           bash -n scripts/check-crakmail-network.sh
           bash -n scripts/install-crakmail-host.sh
+          python3 -m py_compile services/updater/server.py
+      - name: Smoke test updater Unix socket
+        run: |
+          TOKEN=ci-deploy-token-012345678901234567890123456789
+          rm -rf /tmp/crakhost-updater-ci
+          mkdir -p /tmp/crakhost-updater-ci
+          printf '#!/usr/bin/env bash\nexit 0\n' > /tmp/crakhost-updater-ci/true.sh
+          chmod +x /tmp/crakhost-updater-ci/true.sh
+          CRAKHOST_DEPLOY_TOKEN="$TOKEN" \
+          CRAKHOST_UPDATER_SOCKET=/tmp/crakhost-updater-ci/updater.sock \
+          CRAKHOST_UPDATER_STATE=/tmp/crakhost-updater-ci/state.json \
+          CRAKHOST_UPDATER_LOG=/tmp/crakhost-updater-ci/updater.log \
+          CRAKHOST_UPDATE_SCRIPT=/tmp/crakhost-updater-ci/true.sh \
+          CRAKHOST_UPDATE_ROOT="$GITHUB_WORKSPACE" \
+          python3 services/updater/server.py &
+          AGENT_PID=$!
+          trap 'kill "$AGENT_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            [ -S /tmp/crakhost-updater-ci/updater.sock ] && break
+            sleep 0.2
+          done
+          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock -H "x-crakhost-deploy-token: $TOKEN" http://localhost/health >/dev/null
+          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock -H "x-crakhost-deploy-token: $TOKEN" -X POST http://localhost/update >/dev/null
+          sleep 0.5
+          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock -H "x-crakhost-deploy-token: $TOKEN" http://localhost/status | grep -q '"status": "success"'
       - name: Build CrakMail image
         run: docker build -f services/crakmail/Dockerfile -t crakmail-ci .
       - name: Validate production Compose overlays
@@ -119,6 +145,7 @@ jobs:
           cp .env.example .env
           sed -i 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=ci-postgres-password|' .env
           sed -i 's|^CRAKNODE_TOKEN=.*|CRAKNODE_TOKEN=ci-node-token|' .env
+          sed -i 's|^CRAKHOST_DEPLOY_TOKEN=.*|CRAKHOST_DEPLOY_TOKEN=ci-deploy-token-012345678901234567890123456789|' .env
           sed -i 's|^MAIL_DOMAIN=.*|MAIL_DOMAIN=example.com|' .env
           sed -i 's|^MAIL_HOSTNAME=.*|MAIL_HOSTNAME=mail.example.com|' .env
           sed -i 's|^MAIL_PUBLIC_IP=.*|MAIL_PUBLIC_IP=203.0.113.10|' .env

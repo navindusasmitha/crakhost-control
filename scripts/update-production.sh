@@ -10,6 +10,7 @@ OLD_SHA="$(git rev-parse HEAD)"
 BACKUP_ROOT="${CRAKHOST_BACKUP_ROOT:-/var/backups/crakhost}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="$BACKUP_ROOT/$STAMP"
+SOURCE="${CRAKHOST_UPDATE_SOURCE:-terminal}"
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "[CrakHost] Tracked source files have local changes. Commit/stash them before updating." >&2
@@ -44,10 +45,10 @@ ensure_value(){
   [ -n "$current" ] || set_env "$key" "$fallback"
 }
 
-# v0.50+ added maintenance/registration settings that older VPS installs may not have.
-# Bootstrap them before the production Compose overlay is parsed.
+# Keep old VPS installs compatible with current production services.
 ensure_secret CRAKHOST_CRON_SECRET
 ensure_secret CRAKNODE_REGISTRATION_TOKEN
+ensure_secret CRAKHOST_DEPLOY_TOKEN
 ensure_value CRAKHOST_PENDING_ORDER_TTL_HOURS 24
 ensure_value CRAKHOST_COMMERCE_CLEANUP_SECONDS 3600
 if [ -z "$(get_env APP_URL)" ]; then
@@ -57,7 +58,7 @@ fi
 
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.production.yml)
 
-echo "[CrakHost] Creating PostgreSQL backup..."
+echo "[CrakHost] Stage 1/7: creating PostgreSQL backup..."
 if ! "${COMPOSE[@]}" exec -T postgres pg_dump -U crakhost -d crakhost | gzip -9 > "$BACKUP_DIR/crakhost.sql.gz"; then
   echo "[CrakHost] Database backup failed; update cancelled." >&2
   rm -f "$BACKUP_DIR/crakhost.sql.gz"
@@ -67,48 +68,65 @@ if ! "${COMPOSE[@]}" exec -T postgres pg_dump -U crakhost -d crakhost | gzip -9 
 fi
 
 echo "[CrakHost] Backup ready: $BACKUP_DIR"
+echo "[CrakHost] Stage 2/7: fetching latest main branch..."
 git fetch --prune origin main
 git checkout -q main
 git reset --hard origin/main
 NEW_SHA="$(git rev-parse HEAD)"
 
 if [ "$OLD_SHA" = "$NEW_SHA" ]; then
-  echo "[CrakHost] Already on latest main ($NEW_SHA)."
-  curl -fsS http://127.0.0.1:4310/api/health || true
-  exit 0
+  echo "[CrakHost] Source is already on latest main ($NEW_SHA); re-applying production services."
+else
+  echo "[CrakHost] Updating $OLD_SHA -> $NEW_SHA"
 fi
 
-echo "[CrakHost] Updating $OLD_SHA -> $NEW_SHA"
+# The new source may introduce the updater agent itself. A terminal update may
+# restart it; a panel-launched update deliberately leaves its parent agent alive.
+echo "[CrakHost] Stage 3/7: preparing privileged updater agent..."
+CRAKHOST_UPDATE_SOURCE="$SOURCE" bash scripts/install-updater-agent.sh
 
 rollback_code(){
   echo "[CrakHost] Restoring application source to $OLD_SHA" >&2
   git reset --hard "$OLD_SHA"
-  "${COMPOSE[@]}" up -d --build --remove-orphans || true
+  "${COMPOSE[@]}" build panel || true
+  "${COMPOSE[@]}" up -d postgres redis || true
+  "${COMPOSE[@]}" up -d --no-deps --force-recreate craknode || true
+  "${COMPOSE[@]}" up -d --no-deps panel || true
+  "${COMPOSE[@]}" up -d --no-deps commerce-cleanup || true
   echo "[CrakHost] Database migrations are not automatically reversed." >&2
   echo "[CrakHost] Pre-update database backup: $BACKUP_DIR/crakhost.sql.gz" >&2
 }
 
+echo "[CrakHost] Stage 4/7: building panel..."
 if ! "${COMPOSE[@]}" build panel; then
   echo "[CrakHost] Candidate panel build failed." >&2
   git reset --hard "$OLD_SHA"
   exit 1
 fi
 
-"${COMPOSE[@]}" up -d postgres redis craknode
+echo "[CrakHost] Stage 5/7: applying database migrations..."
+"${COMPOSE[@]}" up -d postgres redis
 if ! "${COMPOSE[@]}" run --rm migrate; then
   echo "[CrakHost] Database migration failed." >&2
   rollback_code
   exit 1
 fi
-if ! "${COMPOSE[@]}" up -d --build --remove-orphans; then
-  echo "[CrakHost] Docker startup failed." >&2
-  "${COMPOSE[@]}" ps -a || true
+
+echo "[CrakHost] Stage 6/7: restarting application services..."
+if ! "${COMPOSE[@]}" up -d --no-deps --force-recreate craknode; then
+  echo "[CrakHost] CrakNode restart failed." >&2
   rollback_code
   exit 1
 fi
+if ! "${COMPOSE[@]}" up -d --no-deps panel; then
+  echo "[CrakHost] Panel startup failed." >&2
+  rollback_code
+  exit 1
+fi
+"${COMPOSE[@]}" up -d --no-deps commerce-cleanup
 
 PANEL_OK=0
-for i in $(seq 1 90); do
+for _ in $(seq 1 90); do
   if curl -fsS http://127.0.0.1:4310/api/health >/dev/null 2>&1; then PANEL_OK=1; break; fi
   sleep 2
 done
@@ -120,7 +138,7 @@ if [ "$PANEL_OK" -ne 1 ]; then
 fi
 
 NODE_OK=0
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   if "${COMPOSE[@]}" exec -T panel node -e "fetch('http://craknode:8088/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then NODE_OK=1; break; fi
   sleep 2
 done
@@ -131,11 +149,12 @@ if [ "$NODE_OK" -ne 1 ]; then
   exit 1
 fi
 
-if command -v nginx >/dev/null 2>&1; then
+if [ "$SOURCE" != "panel" ] && command -v nginx >/dev/null 2>&1; then
   nginx -t >/dev/null
   systemctl reload nginx
 fi
 
+echo "[CrakHost] Stage 7/7: verification complete."
 echo "[CrakHost] Update verified successfully."
 echo "[CrakHost] Backup: $BACKUP_DIR"
 curl -fsS http://127.0.0.1:4310/api/health; echo
