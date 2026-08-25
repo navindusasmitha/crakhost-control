@@ -5,12 +5,28 @@ import {sendTemplateEmail} from '@/lib/mail';
 import {preflightProvisioning,provisionServer} from '@/lib/provision';
 
 function appBase(){const raw=process.env.APP_URL||process.env.PANEL_URL||(process.env.PANEL_DOMAIN?`https://${process.env.PANEL_DOMAIN}`:'');return raw.replace(/\/$/,'')}
+function requestKey(req:NextRequest,body:any){return String(body.requestKey||req.headers.get('idempotency-key')||'').trim().slice(0,160)}
+
+async function replayCheckout(userId:string,key:string){
+  if(!key)return null;
+  const {rows}=await db.query(`select o.id,o.status,o.failure_reason,o.server_name,s.identifier,n.name node_name,n.location node_location
+    from orders o left join servers s on s.id=o.server_id left join nodes n on n.id=o.node_id
+    where o.user_id=$1 and o.idempotency_key=$2 limit 1`,[userId,key]);
+  const x=rows[0];if(!x)return null;
+  if(x.status==='ACTIVE'&&x.identifier)return NextResponse.json({ok:true,replayed:true,orderId:x.id,identifier:x.identifier,node:x.node_name,location:x.node_location},{status:200});
+  if(x.status==='FAILED')return NextResponse.json({error:`This checkout attempt already failed: ${x.failure_reason||'provisioning failed'}`,replayed:true,orderId:x.id},{status:409});
+  if(x.status==='CANCELLED')return NextResponse.json({error:'This checkout attempt was cancelled. Start a new checkout attempt.',replayed:true,orderId:x.id},{status:409});
+  if(x.status==='PENDING')return NextResponse.json({error:'This checkout attempt already has an unpaid pending order. Add wallet credits and retry with a new checkout attempt.',replayed:true,orderId:x.id,status:x.status},{status:402});
+  return NextResponse.json({ok:false,replayed:true,pending:true,orderId:x.id,status:x.status},{status:202});
+}
 
 export async function POST(req:NextRequest){
   const user=await getCurrentUser();
   if(!user)return NextResponse.json({error:'Sign in required'},{status:401});
 
   const body=await req.json().catch(()=>({}));
+  const key=requestKey(req,body);
+  const replay=await replayCheckout(user.id,key);if(replay)return replay;
   const slug=String(body.plan||'');
   const serverName=String(body.serverName||'My Server').trim().slice(0,120);
   if(!serverName)return NextResponse.json({error:'Server name is required'},{status:400});
@@ -27,12 +43,17 @@ export async function POST(req:NextRequest){
   const price=Number(plan.price_monthly);
   const credits=Number(user.credits||0);
   if(credits<price){
-    const oq=await db.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,metadata) values($1,$2,'PENDING',$3,$4,$5,$6,'wallet',$7::jsonb) returning id`,[user.id,plan.id,price,plan.currency,templateSlug,serverName,JSON.stringify({...config,reason:'INSUFFICIENT_WALLET'})]);
-    const number=`INV-${Date.now().toString(36).toUpperCase()}-${String(oq.rows[0].id).slice(0,6).toUpperCase()}`;
-    const description=`${plan.name} - ${serverName}`;const dueDate=new Date(Date.now()+24*60*60*1000);
-    await db.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,description) values($1,$2,$3,$4,$5,'DUE',now()+interval '1 day',$6)`,[user.id,oq.rows[0].id,number,price,plan.currency,description]);
-    await sendTemplateEmail('invoice_due',user.email,{name:user.name,invoice_number:number,description,currency:plan.currency,amount:price.toFixed(2),due_date:dueDate.toLocaleString('en-GB',{timeZone:'UTC',dateStyle:'medium',timeStyle:'short'})+' UTC',billing_url:appBase()?`${appBase()}/billing`:''}).catch(e=>console.warn('[mail] invoice due delivery failed',e?.message||e));
-    return NextResponse.json({error:`Wallet balance is ${plan.currency} ${credits.toFixed(2)}. ${plan.currency} ${price.toFixed(2)} is required. Order created as pending.`,orderId:oq.rows[0].id},{status:402});
+    try{
+      const oq=await db.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,metadata,idempotency_key) values($1,$2,'PENDING',$3,$4,$5,$6,'wallet',$7::jsonb,$8) returning id`,[user.id,plan.id,price,plan.currency,templateSlug,serverName,JSON.stringify({...config,reason:'INSUFFICIENT_WALLET'}),key||null]);
+      const number=`INV-${Date.now().toString(36).toUpperCase()}-${String(oq.rows[0].id).slice(0,6).toUpperCase()}`;
+      const description=`${plan.name} - ${serverName}`;const dueDate=new Date(Date.now()+24*60*60*1000);
+      await db.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,description,kind) values($1,$2,$3,$4,$5,'DUE',now()+interval '1 day',$6,'ORDER')`,[user.id,oq.rows[0].id,number,price,plan.currency,description]);
+      await sendTemplateEmail('invoice_due',user.email,{name:user.name,invoice_number:number,description,currency:plan.currency,amount:price.toFixed(2),due_date:dueDate.toLocaleString('en-GB',{timeZone:'UTC',dateStyle:'medium',timeStyle:'short'})+' UTC',billing_url:appBase()?`${appBase()}/billing`:''}).catch(e=>console.warn('[mail] invoice due delivery failed',e?.message||e));
+      return NextResponse.json({error:`Wallet balance is ${plan.currency} ${credits.toFixed(2)}. ${plan.currency} ${price.toFixed(2)} is required. Order created as pending.`,orderId:oq.rows[0].id},{status:402});
+    }catch(e:any){
+      if(e?.code==='23505'&&key){const existing=await replayCheckout(user.id,key);if(existing)return existing;}
+      throw e;
+    }
   }
 
   const client=await db.connect();let order:any;let invoiceNumber='';
@@ -40,15 +61,18 @@ export async function POST(req:NextRequest){
     await client.query('begin');
     const locked=await client.query('select credits from users where id=$1 for update',[user.id]);
     if(Number(locked.rows[0]?.credits)<price)throw new Error('Wallet balance changed; retry checkout');
-    const oq=await client.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,paid_at,metadata) values($1,$2,'PAID',$3,$4,$5,$6,'wallet',now(),$7::jsonb) returning *`,[user.id,plan.id,price,plan.currency,templateSlug,serverName,JSON.stringify({checkout:'storefront',...config})]);
+    const oq=await client.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,paid_at,metadata,idempotency_key) values($1,$2,'PAID',$3,$4,$5,$6,'wallet',now(),$7::jsonb,$8) returning *`,[user.id,plan.id,price,plan.currency,templateSlug,serverName,JSON.stringify({checkout:'storefront',...config}),key||null]);
     order=oq.rows[0];
     await client.query('update users set credits=credits-$2 where id=$1',[user.id,price]);
     await client.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'DEBIT',$3,'order',$4)`,[user.id,-price,`${plan.name} purchase`,order.id]);
     invoiceNumber=`INV-${Date.now().toString(36).toUpperCase()}-${String(order.id).slice(0,6).toUpperCase()}`;
-    await client.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,paid_at,description) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6)`,[user.id,order.id,invoiceNumber,price,plan.currency,`${plan.name} - ${serverName}`]);
+    await client.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,paid_at,description,kind) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6,'ORDER')`,[user.id,order.id,invoiceNumber,price,plan.currency,`${plan.name} - ${serverName}`]);
     await client.query('commit');
-  }catch(e:any){await client.query('rollback').catch(()=>{});client.release();return NextResponse.json({error:e.message||'Checkout failed'},{status:409})}
-  client.release();
+  }catch(e:any){
+    await client.query('rollback').catch(()=>{});
+    if(e?.code==='23505'&&key){const existing=await replayCheckout(user.id,key);if(existing)return existing;}
+    return NextResponse.json({error:e.message||'Checkout failed'},{status:409});
+  }finally{client.release()}
 
   try{
     await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1",[order.id]);
