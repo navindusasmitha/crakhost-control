@@ -8,9 +8,11 @@ export async function POST(req:Request){
   try{
     const {email,password}=await req.json();
     if(typeof email!=='string'||typeof password!=='string')return NextResponse.json({error:'Email and password are required.'},{status:400});
-    const {rows}=await db.query('select id,name,email,password_hash,role,credits,email_verified_at from users where lower(email)=lower($1) limit 1',[email.trim()]);
+    const {rows}=await db.query('select id,name,email,password_hash,role,credits,email_verified_at,account_status,ban_reason from users where lower(email)=lower($1) limit 1',[email.trim()]);
     const user=rows[0];
     if(!user||!verifyPassword(password,user.password_hash))return NextResponse.json({error:'Invalid email or password.'},{status:401});
+    if(user.account_status==='BANNED')return NextResponse.json({error:user.ban_reason?`Account suspended: ${user.ban_reason}`:'This account has been suspended. Contact support.',code:'ACCOUNT_BANNED'},{status:403});
+    if(user.account_status==='DELETED')return NextResponse.json({error:'This account is no longer available.',code:'ACCOUNT_DELETED'},{status:403});
     if(!user.email_verified_at)return NextResponse.json({error:'Verify your email before signing in.',code:'EMAIL_VERIFICATION_REQUIRED',email:user.email},{status:403});
     const token=await createSession(user.id);
     const res=NextResponse.json({ok:true,user:{id:user.id,name:user.name,email:user.email,role:user.role,credits:user.credits,emailVerified:true}});
