@@ -9,11 +9,65 @@ async function runSchedule(s){const id=s.identifier;switch(s.action){case'start'
 async function tick(){const now=new Date();const {rows}=await db.query(`select sc.*,s.identifier,s.owner_id,n.base_url,n.api_token from schedules sc join servers s on s.id=sc.server_id left join nodes n on n.id=s.node_id where sc.enabled=true order by sc.created_at limit 200`);for(const s of rows){try{if(!s.next_run_at){await db.query('update schedules set next_run_at=$2 where id=$1',[s.id,nextRun(s.cron,now)]);continue}if(new Date(s.next_run_at)>now)continue;await runSchedule(s);const nr=nextRun(s.cron,now);await db.query("update schedules set last_run_at=now(),next_run_at=$2,run_count=run_count+1,failure_count=0,last_error='' where id=$1",[s.id,nr]);await db.query("insert into audit_events(event,subject_type,subject_id,metadata) values('schedule.run','server',$1,$2::jsonb)",[s.server_id,JSON.stringify({schedule:s.id,action:s.action})]);await db.query("insert into notifications(user_id,title,body,kind) values($1,$2,$3,'success')",[s.owner_id,`Schedule completed: ${s.name}`,`${s.action} ran on ${s.identifier}`])}catch(e){const msg=String(e?.message||e).slice(0,800);await db.query('update schedules set failure_count=failure_count+1,last_error=$2,next_run_at=$3 where id=$1',[s.id,msg,nextRun(s.cron,now)]).catch(()=>{});await db.query("insert into notifications(user_id,title,body,kind) values($1,$2,$3,'error')",[s.owner_id,`Schedule failed: ${s.name}`,msg]).catch(()=>{});console.error('[schedule]',s.name,msg)}}}
 
 async function billingTick(){
-  const {rows}=await db.query(`select s.*,p.price_monthly,p.currency,p.name plan_name,u.credits,n.base_url,n.api_token from servers s join plans p on p.id=s.plan_id join users u on u.id=s.owner_id left join nodes n on n.id=s.node_id where s.next_due_at is not null and s.next_due_at<=now() and s.billing_status in ('ACTIVE','SUSPENDED') order by s.next_due_at limit 50`);
-  for(const s of rows){const price=Number(s.price_monthly),credits=Number(s.credits);try{
-    if(credits>=price){const c=await db.connect();try{await c.query('begin');const f=await c.query('select credits from users where id=$1 for update',[s.owner_id]);if(Number(f.rows[0].credits)<price){await c.query('rollback');continue}await c.query('update users set credits=credits-$2 where id=$1',[s.owner_id,price]);await c.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'DEBIT',$3,'server',$4)`,[s.owner_id,-price,`Renewal: ${s.name}`,s.id]);const num=`INV-${Date.now().toString(36).toUpperCase()}-${s.id.slice(0,6).toUpperCase()}`;await c.query(`insert into invoices(user_id,number,amount,currency,status,due_at,paid_at,description) values($1,$2,$3,$4,'PAID',now(),now(),$5)`,[s.owner_id,num,price,s.currency,`${s.plan_name} renewal - ${s.name}`]);await c.query(`update servers set next_due_at=greatest(next_due_at,now())+interval '30 days',billing_status='ACTIVE',suspended=false,suspended_at=null,updated_at=now() where id=$1`,[s.id]);await c.query('commit')}catch(e){await c.query('rollback');throw e}finally{c.release()}if(s.suspended){await callNode(s,`/v1/servers/${s.identifier}/action`,{action:'start'}).catch(()=>{})}await db.query("insert into notifications(user_id,title,body,kind) values($1,'Service renewed',$2,'success')",[s.owner_id,`${s.name} renewed for ${s.currency} ${price}`]);
-    }else{if(!s.suspended){await callNode(s,`/v1/servers/${s.identifier}/action`,{action:'stop'}).catch(()=>{});await db.query(`update servers set suspended=true,suspended_at=now(),billing_status='SUSPENDED',status='offline',updated_at=now() where id=$1`,[s.id]);const num=`INV-${Date.now().toString(36).toUpperCase()}-${s.id.slice(0,6).toUpperCase()}`;await db.query(`insert into invoices(user_id,number,amount,currency,status,due_at,description) values($1,$2,$3,$4,'DUE',now(),$5) on conflict(number) do nothing`,[s.owner_id,num,price,s.currency,`${s.plan_name} renewal - ${s.name}`]);await db.query("insert into notifications(user_id,title,body,kind) values($1,'Service suspended',$2,'error')",[s.owner_id,`${s.name} was suspended because wallet credits are insufficient.`])}}
-  }catch(e){console.error('[billing]',s.identifier,String(e?.message||e))}}
+  const {rows}=await db.query(`select s.id from servers s where s.next_due_at is not null and s.next_due_at<=now() and s.billing_status in ('ACTIVE','SUSPENDED') order by s.next_due_at limit 50`);
+  for(const candidate of rows){
+    let runtime=null,action='',notify='',notifyKind='info',price=0,currency='',serviceName='';
+    try{
+      const c=await db.connect();
+      try{
+        await c.query('begin');
+        await c.query('select pg_advisory_xact_lock(hashtext($1))',[`crakhost:billing:${candidate.id}`]);
+        const sq=await c.query(`select s.*,p.price_monthly,p.currency,p.name plan_name,n.base_url,n.api_token
+          from servers s join plans p on p.id=s.plan_id left join nodes n on n.id=s.node_id
+          where s.id=$1 for update of s`,[candidate.id]);
+        const s=sq.rows[0];
+        if(!s||!s.next_due_at||new Date(s.next_due_at)>new Date()||!['ACTIVE','SUSPENDED'].includes(s.billing_status)){await c.query('commit');continue}
+        runtime=s;price=Number(s.price_monthly);currency=s.currency;serviceName=s.name;
+        const uq=await c.query('select credits from users where id=$1 for update',[s.owner_id]);
+        const credits=Number(uq.rows[0]?.credits||0);
+        const iq=await c.query(`select id,number from invoices where server_id=$1 and kind='RENEWAL' and status='DUE' order by created_at desc limit 1 for update`,[s.id]);
+        const dueInvoice=iq.rows[0];
+
+        if(credits>=price){
+          await c.query('update users set credits=credits-$2 where id=$1',[s.owner_id,price]);
+          await c.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'DEBIT',$3,'server',$4)`,[s.owner_id,-price,`Renewal: ${s.name}`,s.id]);
+          const next=await c.query(`update servers set next_due_at=greatest(next_due_at,now())+interval '30 days',billing_status='ACTIVE',suspended=false,suspended_at=null,updated_at=now() where id=$1 returning next_due_at`,[s.id]);
+          const nextDue=next.rows[0].next_due_at;
+          if(dueInvoice){
+            await c.query(`update invoices set amount=$2,currency=$3,status='PAID',paid_at=now(),period_start=coalesce(period_start,$4),period_end=$5,description=$6 where id=$1`,[dueInvoice.id,price,s.currency,s.next_due_at,nextDue,`${s.plan_name} renewal - ${s.name}`]);
+          }else{
+            const num=`INV-${Date.now().toString(36).toUpperCase()}-${s.id.slice(0,6).toUpperCase()}`;
+            await c.query(`insert into invoices(user_id,server_id,number,amount,currency,status,due_at,paid_at,description,kind,period_start,period_end) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6,'RENEWAL',$7,$8)`,[s.owner_id,s.id,num,price,s.currency,`${s.plan_name} renewal - ${s.name}`,s.next_due_at,nextDue]);
+          }
+          await c.query("insert into service_events(server_id,type,detail) values($1,'billing.renewed',$2)",[s.id,`${s.currency} ${price} charged; next due ${new Date(nextDue).toISOString()}`]);
+          await c.query('commit');
+          action=s.suspended?'start':'';notify=`${s.name} renewed for ${s.currency} ${price}`;notifyKind='success';
+        }else{
+          if(dueInvoice){
+            await c.query(`update invoices set amount=$2,currency=$3,due_at=coalesce(due_at,now()),period_start=coalesce(period_start,$4),period_end=coalesce(period_end,$4+interval '30 days'),description=$5 where id=$1`,[dueInvoice.id,price,s.currency,s.next_due_at,`${s.plan_name} renewal - ${s.name}`]);
+          }else{
+            const num=`INV-${Date.now().toString(36).toUpperCase()}-${s.id.slice(0,6).toUpperCase()}`;
+            await c.query(`insert into invoices(user_id,server_id,number,amount,currency,status,due_at,description,kind,period_start,period_end) values($1,$2,$3,$4,$5,'DUE',now(),$6,'RENEWAL',$7,$7+interval '30 days')`,[s.owner_id,s.id,num,price,s.currency,`${s.plan_name} renewal - ${s.name}`,s.next_due_at]);
+          }
+          const wasSuspended=!!s.suspended;
+          await c.query(`update servers set suspended=true,suspended_at=coalesce(suspended_at,now()),billing_status='SUSPENDED',updated_at=now() where id=$1`,[s.id]);
+          if(!wasSuspended)await c.query("insert into service_events(server_id,type,detail) values($1,'billing.suspended',$2)",[s.id,`Wallet credits below ${s.currency} ${price}`]);
+          await c.query('commit');
+          action=(!wasSuspended||String(s.status).toLowerCase()!=='offline')?'stop':'';
+          if(!wasSuspended){notify=`${s.name} was suspended because wallet credits are insufficient.`;notifyKind='error'}
+        }
+      }catch(e){await c.query('rollback').catch(()=>{});throw e}finally{c.release()}
+
+      if(action&&runtime){
+        try{
+          await callNode(runtime,`/v1/servers/${runtime.identifier}/action`,{action});
+          await db.query("update servers set status=$2,updated_at=now() where id=$1",[runtime.id,action==='start'?'running':'offline']);
+          await db.query("insert into service_events(server_id,type,detail) values($1,$2,$3)",[runtime.id,action==='start'?'billing.runtime_resumed':'billing.runtime_stopped',`CrakNode ${action} completed after billing transition`]).catch(()=>{});
+        }catch(e){const msg=String(e?.message||e).slice(0,500);await db.query("insert into service_events(server_id,type,detail) values($1,'billing.runtime_action_failed',$2)",[runtime.id,`${action}: ${msg}`]).catch(()=>{});if(action==='start')await db.query("update servers set status='error',updated_at=now() where id=$1",[runtime.id]).catch(()=>{});console.error('[billing-runtime]',runtime.identifier,msg)}
+      }
+      if(notify&&runtime)await db.query('insert into notifications(user_id,title,body,kind) values($1,$2,$3,$4)',[runtime.owner_id,notifyKind==='success'?'Service renewed':'Service suspended',notify,notifyKind]).catch(()=>{});
+    }catch(e){console.error('[billing]',candidate.id,String(e?.message||e))}
+  }
 }
-async function main(){console.log('CrakHost Worker v0.10 started');for(;;){try{await tick();await billingTick()}catch(e){console.error('[worker]',e)}await sleep(30000)}}
+async function main(){console.log('CrakHost Worker v0.50 started');for(;;){try{await tick();await billingTick()}catch(e){console.error('[worker]',e)}await sleep(30000)}}
 main().catch(e=>{console.error(e);process.exit(1)});
