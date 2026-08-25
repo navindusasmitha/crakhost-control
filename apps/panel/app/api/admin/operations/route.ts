@@ -3,34 +3,105 @@ import {db} from '@/lib/db';
 import {getCurrentUser,isStaff,isAdmin} from '@/lib/auth';
 import {nodeFetchFor} from '@/lib/node';
 import {audit} from '@/lib/audit';
+import {updaterAgentRequest} from '@/lib/updater-agent';
 
 export const dynamic='force-dynamic';
+export const runtime='nodejs';
+
+const VERSION='0.56.0';
+
 export async function GET(){
-  const user=await getCurrentUser(); if(!isStaff(user)) return NextResponse.json({error:'Forbidden'},{status:403});
-  let databaseMs:number|null=null,databaseStatus='online';try{const started=Date.now();await db.query('select 1');databaseMs=Date.now()-started}catch{databaseStatus='offline'}
+  const user=await getCurrentUser();
+  if(!isStaff(user))return NextResponse.json({error:'Forbidden'},{status:403});
+
+  let databaseMs:number|null=null,databaseStatus='online';
+  try{const started=Date.now();await db.query('select 1');databaseMs=Date.now()-started}catch{databaseStatus='offline'}
+
   const {rows:nodes}=await db.query(`select id,name,location,base_url,api_token,enabled,last_seen_at,agent_version from nodes order by name`);
-  const checks:any[]=[];
-  for(const n of nodes){
-    const t=Date.now();
-    if(!n.enabled){checks.push({id:n.id,name:n.name,location:n.location,enabled:false,status:'disabled',latencyMs:null});continue}
+  const checks=await Promise.all(nodes.map(async(n:any)=>{
+    const started=Date.now();
+    if(!n.enabled)return{id:n.id,name:n.name,location:n.location,enabled:false,status:'disabled',latencyMs:null,version:n.agent_version||''};
     try{
-      const d=await nodeFetchFor(n,'/diagnostics'); const latency=Date.now()-t;
-      checks.push({id:n.id,name:n.name,location:n.location,enabled:true,status:'online',latencyMs:latency,version:d.version||n.agent_version||'',dockerVersion:d.dockerVersion||'',managedContainers:Number(d.managedContainers)||0,runningContainers:Number(d.runningContainers)||0,diskFreeBytes:d.diskFreeBytes?Number(d.diskFreeBytes):null});
-      await db.query(`insert into node_health_snapshots(node_id,status,latency_ms,docker_version,managed_containers,running_containers,disk_free_bytes,detail) values($1,'online',$2,$3,$4,$5,$6,$7)`,[n.id,latency,String(d.dockerVersion||''),Number(d.managedContainers)||0,Number(d.runningContainers)||0,d.diskFreeBytes?Number(d.diskFreeBytes):null,JSON.stringify(d)]).catch(()=>null);
-      await db.query(`update nodes set last_seen_at=now(),agent_version=$2 where id=$1`,[n.id,String(d.version||n.agent_version||'')]).catch(()=>null);
+      const d=await nodeFetchFor(n,'/diagnostics');
+      const latency=Date.now()-started;
+      await Promise.all([
+        db.query(`insert into node_health_snapshots(node_id,status,latency_ms,docker_version,managed_containers,running_containers,disk_free_bytes,detail) values($1,'online',$2,$3,$4,$5,$6,$7)`,[n.id,latency,String(d.dockerVersion||''),Number(d.managedContainers)||0,Number(d.runningContainers)||0,d.diskFreeBytes?Number(d.diskFreeBytes):null,JSON.stringify(d)]).catch(()=>null),
+        db.query(`update nodes set last_seen_at=now(),agent_version=$2 where id=$1`,[n.id,String(d.version||n.agent_version||'')]).catch(()=>null)
+      ]);
+      return{id:n.id,name:n.name,location:n.location,enabled:true,status:'online',latencyMs:latency,version:d.version||n.agent_version||'',dockerVersion:d.dockerVersion||'',managedContainers:Number(d.managedContainers)||0,runningContainers:Number(d.runningContainers)||0,diskFreeBytes:d.diskFreeBytes?Number(d.diskFreeBytes):null};
     }catch(e:any){
-      const latency=Date.now()-t;checks.push({id:n.id,name:n.name,location:n.location,enabled:true,status:'offline',latencyMs:latency,error:String(e?.message||'Node unavailable').slice(0,180)});
-      await db.query(`insert into node_health_snapshots(node_id,status,latency_ms,detail) values($1,'offline',$2,$3)`,[n.id,latency,JSON.stringify({error:String(e?.message||'Node unavailable').slice(0,180)})]).catch(()=>null);
+      const latency=Date.now()-started;
+      const error=String(e?.message||'Node unavailable').slice(0,180);
+      await db.query(`insert into node_health_snapshots(node_id,status,latency_ms,detail) values($1,'offline',$2,$3)`,[n.id,latency,JSON.stringify({error})]).catch(()=>null);
+      return{id:n.id,name:n.name,location:n.location,enabled:true,status:'offline',latencyMs:latency,error,version:n.agent_version||''};
     }
+  }));
+
+  const [settingsQ,countsQ,queueQ,incidentsQ,timelineQ]=await Promise.all([
+    db.query(`select value from system_settings where key='operations'`),
+    db.query(`select
+      (select count(*) from users)::int users,
+      (select count(*) from servers)::int servers,
+      (select count(*) from servers where status='running')::int running,
+      (select count(*) from servers where suspended=true or billing_status='SUSPENDED')::int suspended_servers,
+      (select count(*) from support_tickets where status<>'CLOSED')::int open_tickets,
+      (select count(*) from support_tickets where status<>'CLOSED' and priority in ('HIGH','URGENT'))::int priority_tickets,
+      (select count(*) from orders where status='FAILED')::int failed_orders,
+      (select count(*) from orders where status='FAILED' and updated_at>=now()-interval '24 hours')::int failed_orders_24h,
+      (select count(*) from orders where status in ('PENDING','PAID','PROVISIONING'))::int provisioning_queue,
+      (select count(*) from invoices where status='DUE')::int due_invoices`),
+    db.query(`select o.id,o.status,o.server_name,o.amount,o.currency,o.failure_reason,o.created_at,o.updated_at,u.name customer_name,u.email customer_email,p.name plan_name,n.name node_name
+      from orders o
+      join users u on u.id=o.user_id
+      left join plans p on p.id=o.plan_id
+      left join nodes n on n.id=o.node_id
+      where o.status in ('PENDING','PAID','PROVISIONING','FAILED')
+      order by case o.status when 'PROVISIONING' then 0 when 'PAID' then 1 when 'PENDING' then 2 else 3 end,o.updated_at desc
+      limit 12`),
+    db.query(`select kind,title,detail,severity,created_at from (
+      select 'node'::text kind,n.name::text title,coalesce(h.detail->>'error','Node health check reported '||h.status)::text detail,'critical'::text severity,h.created_at
+      from node_health_snapshots h join nodes n on n.id=h.node_id
+      where h.status<>'online' and h.created_at>=now()-interval '24 hours'
+      union all
+      select 'order'::text,o.server_name::text,coalesce(nullif(o.failure_reason,''),'Provisioning failed')::text,'critical'::text,o.updated_at
+      from orders o where o.status='FAILED' and o.updated_at>=now()-interval '24 hours'
+      union all
+      select 'ticket'::text,t.subject::text,('Priority '||t.priority)::text,case when t.priority='URGENT' then 'critical' else 'warning' end::text,t.updated_at
+      from support_tickets t where t.status<>'CLOSED' and t.priority in ('HIGH','URGENT')
+    ) x order by created_at desc limit 12`),
+    db.query(`select date_trunc('hour',created_at) bucket,count(*)::int samples,count(*) filter(where status='online')::int online,coalesce(round(avg(latency_ms)),0)::int latency_ms
+      from node_health_snapshots where created_at>=now()-interval '12 hours'
+      group by 1 order by 1`)
+  ]);
+
+  let host:any=null;
+  if(isAdmin(user)){
+    try{const result=await updaterAgentRequest('/metrics');host=result.data}catch(error){host={error:error instanceof Error?error.message:'Host agent unavailable.'}}
   }
-  const {rows:s}=await db.query(`select value from system_settings where key='operations'`);
-  const {rows:counts}=await db.query(`select (select count(*) from users) users,(select count(*) from servers) servers,(select count(*) from servers where status='running') running,(select count(*) from support_tickets where status<>'CLOSED') open_tickets,(select count(*) from orders where status='FAILED') failed_orders`);
-  return NextResponse.json({panel:{status:'online',version:process.env.npm_package_version||'unknown',uptimeSeconds:Math.floor(process.uptime()),databaseStatus,databaseMs},nodes:checks,settings:s[0]?.value||{},counts:counts[0]||{}},{headers:{'cache-control':'no-store'}});
+
+  const c=countsQ.rows[0]||{};
+  const counts={users:Number(c.users||0),servers:Number(c.servers||0),running:Number(c.running||0),suspended_servers:Number(c.suspended_servers||0),open_tickets:Number(c.open_tickets||0),priority_tickets:Number(c.priority_tickets||0),failed_orders:Number(c.failed_orders||0),failed_orders_24h:Number(c.failed_orders_24h||0),provisioning_queue:Number(c.provisioning_queue||0),due_invoices:Number(c.due_invoices||0)};
+  const settings=settingsQ.rows[0]?.value||{maintenanceMode:false,maintenanceMessage:'Scheduled maintenance in progress.',healthRetentionDays:14};
+  return NextResponse.json({
+    panel:{status:'online',version:VERSION,uptimeSeconds:Math.floor(process.uptime()),databaseStatus,databaseMs},
+    nodes:checks,
+    host,
+    settings,
+    counts,
+    queue:queueQ.rows,
+    incidents:incidentsQ.rows,
+    healthTimeline:timelineQ.rows
+  },{headers:{'cache-control':'no-store'}});
 }
+
 export async function PATCH(req:NextRequest){
-  const user=await getCurrentUser(); if(!isAdmin(user)) return NextResponse.json({error:'Admin required'},{status:403});
-  const body=await req.json().catch(()=>({})); const maintenanceMode=body.maintenanceMode===true; const maintenanceMessage=String(body.maintenanceMessage||'Scheduled maintenance in progress.').trim().slice(0,240)||'Scheduled maintenance in progress.';
-  const retention=Number(body.healthRetentionDays);const value={maintenanceMode,maintenanceMessage,healthRetentionDays:Number.isFinite(retention)?Math.min(90,Math.max(1,Math.trunc(retention))):14};
+  const user=await getCurrentUser();
+  if(!isAdmin(user))return NextResponse.json({error:'Admin required'},{status:403});
+  const body=await req.json().catch(()=>({}));
+  const maintenanceMode=body.maintenanceMode===true;
+  const maintenanceMessage=String(body.maintenanceMessage||'Scheduled maintenance in progress.').trim().slice(0,240)||'Scheduled maintenance in progress.';
+  const retention=Number(body.healthRetentionDays);
+  const value={maintenanceMode,maintenanceMessage,healthRetentionDays:Number.isFinite(retention)?Math.min(90,Math.max(1,Math.trunc(retention))):14};
   await db.query(`insert into system_settings(key,value,updated_by,updated_at) values('operations',$1,$2,now()) on conflict(key) do update set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,[JSON.stringify(value),user.id]);
   await audit(user.id,'operations.settings.update','system','operations',value);
   return NextResponse.json({ok:true,settings:value},{headers:{'cache-control':'no-store'}});
