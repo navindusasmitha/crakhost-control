@@ -1,20 +1,32 @@
 'use client';
 import Link from'next/link';
 import{useEffect,useState}from'react';
-import{Receipt,Server,Wallet,History,ShoppingCart,ShieldCheck,ArrowUpRight,RotateCcw,Loader2}from'lucide-react';
+import{Receipt,Server,Wallet,History,ShoppingCart,ShieldCheck,ArrowUpRight,RotateCcw,Loader2,CreditCard}from'lucide-react';
 
 export default function BillingManager(){
  const[plans,setPlans]=useState<any[]>([]),[history,setHistory]=useState<any>({credits:0,wallet:[],invoices:[]}),[orders,setOrders]=useState<any[]>([]),[msg,setMsg]=useState(''),[msgError,setMsgError]=useState(false),[busyOrder,setBusyOrder]=useState('');
  async function load(){setMsg('');setMsgError(false);try{const[p,h,o]=await Promise.all([fetch('/api/plans',{cache:'no-store'}),fetch('/api/billing/history',{cache:'no-store'}),fetch('/api/billing/orders',{cache:'no-store'})]);const[pd,hd,od]=await Promise.all([p.json(),h.json(),o.json()]);if(!p.ok)throw new Error(pd.error||'Unable to load plans');if(!h.ok)throw new Error(hd.error||'Unable to load billing history');if(!o.ok)throw new Error(od.error||'Unable to load orders');setPlans(pd.plans||[]);setHistory(hd);setOrders(od.orders||[])}catch(e:any){setMsgError(true);setMsg(e.message||'Billing data unavailable')}}
  useEffect(()=>{void load()},[]);
+ async function resumeRequest(o:any){const r=await fetch(`/api/billing/orders/${encodeURIComponent(o.id)}/resume`,{method:'POST'});const d=await r.json().catch(()=>({}));return{r,d}}
  async function resumeOrder(o:any){
   if(busyOrder)return;setBusyOrder(o.id);setMsg('');setMsgError(false);
   try{
-   const r=await fetch(`/api/billing/orders/${encodeURIComponent(o.id)}/resume`,{method:'POST'});const d=await r.json().catch(()=>({}));
-   if(r.status===202){setMsg('Provisioning is already running for this paid order. No second server or payment will be created.');return}
-   if(!r.ok){setMsgError(true);setMsg(d.error||'Unable to resume provisioning.');return}
+   const{r,d}=await resumeRequest(o);
+   if(r.status===202){await load();setMsg('Provisioning is already running for this paid order. No second server or payment will be created.');return}
+   if(!r.ok){await load();setMsgError(d.code!=='PROVISIONING_RETRYABLE');setMsg(d.error||'Unable to resume provisioning.');return}
    await load();setMsgError(false);setMsg(d.identifier?`Provisioning recovered. ${d.identifier} is ready.`:'Order recovery completed.');
   }catch(e:any){setMsgError(true);setMsg(e.message||'Unable to resume provisioning.')}finally{setBusyOrder('')}
+ }
+ async function payAndProvision(o:any){
+  if(busyOrder)return;setBusyOrder(o.id);setMsg('');setMsgError(false);
+  try{
+   const p=await fetch(`/api/billing/orders/${encodeURIComponent(o.id)}/pay`,{method:'POST'});const pd=await p.json().catch(()=>({}));
+   if(!p.ok){setMsgError(true);setMsg(pd.error||'Unable to pay this pending order.');await load();return}
+   const{r,d}=await resumeRequest(o);
+   if(r.status===202){await load();setMsg('Payment completed. Provisioning is already running safely in another request.');return}
+   if(!r.ok){await load();setMsgError(d.code!=='PROVISIONING_RETRYABLE');setMsg(d.code==='PROVISIONING_RETRYABLE'?'Payment completed. Provisioning is temporarily unavailable; use Resume when capacity is available.':(d.error||'Payment completed, but provisioning needs attention. Use Resume to retry safely.'));return}
+   await load();setMsgError(false);setMsg(d.identifier?`Payment completed and ${d.identifier} is ready.`:'Payment and provisioning completed.');
+  }catch(e:any){setMsgError(true);setMsg(e.message||'Unable to pay and provision this order.')}finally{setBusyOrder('')}
  }
  const active=orders.filter((o:any)=>o.status==='ACTIVE').length,paidInvoices=(history.invoices||[]).filter((i:any)=>i.status==='PAID').length;
  return <>
@@ -26,8 +38,8 @@ export default function BillingManager(){
 
   <section className="panelSection"><div className="twoCol"><div className="card"><div className="panelSectionHead"><div><h2><Receipt size={14}/> Invoices</h2><p>Actual invoice records for this account.</p></div></div><div className="timelineList">{history.invoices?.length?history.invoices.map((i:any)=><div className="timelineRow" key={i.id}><span><b>{i.number||'Invoice'}</b><small>{i.description||'Service invoice'} · {i.created_at?new Date(i.created_at).toLocaleString():''}</small></span><span style={{textAlign:'right'}}><b>{i.currency} {Number(i.amount).toLocaleString()}</b><small>{i.status}</small></span></div>):<div className="emptyState">No invoices yet.</div>}</div></div><div className="card"><div className="panelSectionHead"><div><h2><Wallet size={14}/> Wallet activity</h2><p>Credits and debits recorded by the billing engine.</p></div></div><div className="timelineList">{history.wallet?.length?history.wallet.map((w:any)=><div className="timelineRow" key={w.id}><span><b>{w.description||'Wallet transaction'}</b><small>{w.created_at?new Date(w.created_at).toLocaleString():''}</small></span><b className={Number(w.amount)>=0?'amountPositive':'amountNegative'}>{Number(w.amount)>0?'+':''}{Number(w.amount).toLocaleString()}</b></div>):<div className="emptyState">No wallet transactions yet.</div>}</div></div></div></section>
 
-  <section className="panelSection"><div className="card"><div className="panelSectionHead"><div><h2><History size={14}/> Order timeline</h2><p>Paid orders that were interrupted during deployment can be resumed safely without charging or provisioning twice.</p></div></div><div className="timelineList">{orders.length?orders.map((o:any)=>{const resumable=o.status==='PAID'||o.status==='PROVISIONING';return <div className="timelineRow" key={o.id}><span><b>{o.plan_name||o.server_name||'Hosting order'}</b><small>{o.identifier||o.server_name||'Pending server'} · {o.created_at?new Date(o.created_at).toLocaleString():''}</small></span><span className="adminActionGroup">{o.status==='ACTIVE'&&o.identifier&&<Link className="btn" href={`/servers/${encodeURIComponent(o.identifier)}`}>Open</Link>}{resumable&&<button className="btn indigo" disabled={!!busyOrder} onClick={()=>resumeOrder(o)}>{busyOrder===o.id?<Loader2 size={13}/>:<RotateCcw size={13}/>} {busyOrder===o.id?'Checking':'Resume'}</button>}<span className={`statusDot ${statusClass(o.status)}`}>{o.status||'unknown'}</span></span></div>}):<div className="emptyState"><ShieldCheck size={18}/> No orders yet.</div>}</div></div></section>
+  <section className="panelSection"><div className="card"><div className="panelSectionHead"><div><h2><History size={14}/> Order timeline</h2><p>Pending wallet orders can be paid later, while interrupted paid deployments can be resumed without charging or provisioning twice.</p></div></div><div className="timelineList">{orders.length?orders.map((o:any)=>{const resumable=o.status==='PAID'||o.status==='PROVISIONING',payable=o.status==='PENDING'&&o.payment_method==='wallet';return <div className="timelineRow" key={o.id}><span><b>{o.plan_name||o.server_name||'Hosting order'}</b><small>{o.identifier||o.server_name||'Pending server'} · {o.currency} {Number(o.amount||0).toLocaleString()} · {o.created_at?new Date(o.created_at).toLocaleString():''}</small></span><span className="adminActionGroup">{o.status==='ACTIVE'&&o.identifier&&<Link className="btn" href={`/servers/${encodeURIComponent(o.identifier)}`}>Open</Link>}{payable&&<button className="btn indigo" disabled={!!busyOrder} onClick={()=>payAndProvision(o)}>{busyOrder===o.id?<Loader2 size={13}/>:<CreditCard size={13}/>} {busyOrder===o.id?'Processing':'Pay & provision'}</button>}{resumable&&<button className="btn indigo" disabled={!!busyOrder} onClick={()=>resumeOrder(o)}>{busyOrder===o.id?<Loader2 size={13}/>:<RotateCcw size={13}/>} {busyOrder===o.id?'Checking':'Resume'}</button>}<span className={`statusDot ${statusClass(o.status)}`}>{o.status||'unknown'}</span></span></div>}):<div className="emptyState"><ShieldCheck size={18}/> No orders yet.</div>}</div></div></section>
  </>
 }
 function Metric({label,value,hint,icon}:{label:string;value:any;hint:string;icon:React.ReactNode}){return <div className="surfaceMetric"><div className="surfaceMetricTop"><span>{label}</span>{icon}</div><strong>{value}</strong><small>{hint}</small></div>}
-function statusClass(v:any){const s=String(v||'unknown').toLowerCase();return ['running','active','online','offline','failed','suspended','provisioning','starting','paid'].includes(s)?s:'unknown'}
+function statusClass(v:any){const s=String(v||'unknown').toLowerCase();return ['running','active','online','offline','failed','suspended','provisioning','starting','paid','pending'].includes(s)?s:'unknown'}
