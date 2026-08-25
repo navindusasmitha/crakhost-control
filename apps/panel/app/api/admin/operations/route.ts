@@ -7,7 +7,7 @@ import {updaterAgentRequest} from '@/lib/updater-agent';
 
 export const dynamic='force-dynamic';
 export const runtime='nodejs';
-const VERSION='0.58.1';
+const VERSION='0.58.2';
 
 export async function GET(){
   const user=await getCurrentUser();if(!isStaff(user))return NextResponse.json({error:'Forbidden'},{status:403});
