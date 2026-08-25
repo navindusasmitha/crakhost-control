@@ -1,35 +1,61 @@
-# 🚀 CrakHost Control — Complete Version History & Documentation
+# CrakHost Control v0.51
 
-Welcome to the consolidated release notes and installation manual for **CrakHost Control**.
+CrakHost Control is a self-hosted hosting control plane for game servers and VPS-style services. It combines a Next.js customer/admin panel, PostgreSQL billing data, Redis, and the CrakNode Docker runtime agent.
 
----
+## Current capabilities
 
-### 🌟 Key Highlights
+- Customer accounts, email verification, sessions and staff roles
+- Plans, wallet billing, invoices and protected order lifecycle
+- Idempotent checkout and resumable provisioning
+- Minecraft/game server provisioning through CrakNode
+- Server console/actions, backups, databases, allocations and schedules
+- Admin users, plans, orders, invoices, nodes and support tooling
+- Support tickets, API keys, webhooks and notifications
+- CrakMail self-hosted mail stack
+- Production Docker Compose, Nginx reverse proxy and optional Let's Encrypt TLS
+- Backup-first production updater and health checks
 
-* **v0.13 (Production VPS Edition):** Caddy HTTPS domain overlay, fully Dockerized panel, Minecraft & FiveM production templates, GitHub release workflow, one-command Linux installer, backup-first updater, and in-panel update checker.
-* **v0.12 (Infrastructure & Security):** Infrastructure Center, database host registry, server migration jobs, reseller ownership foundation, TOTP/2FA schema, SFTP credential schema, and conflict-safe Windows upgrade script.
-* **v0.11 (Operations & Health):** Operations Center, Docker external volume fixes, CrakNode `/diagnostics` endpoint, admin server ownership transfers, and configurable maintenance mode.
+External payment gateways are intentionally disabled for now. The active checkout methods are CrakHost Wallet and the development test-card simulator.
 
----
+## Production VPS install
 
-### 📊 Comprehensive Feature Matrix
+Point your panel domain to the VPS first, then run:
 
-| Feature / Capability | 📦 v0.11 | 🔐 v0.12 | 🌐 v0.13 |
-| :--- | :---: | :---: | :---: |
-| **Primary Target Platform** | Node / Docker | Windows / Dev | Production VPS (Linux) |
-| **Installer & Updaters** | Manual / Script | PowerShell Upgrade | One-Command Linux Installer |
-| **Reverse Proxy & SSL** | — | — | Caddy Auto-HTTPS Overlay |
-| **Game Server Templates** | — | — | Minecraft & FiveM |
-| **Management Dashboard** | Operations Center | Infrastructure Center | In-Panel Update Checker |
-| **Security & Auth** | Node Auth | TOTP/2FA & SFTP Schema | Docker Security Boundary |
-| **Node Diagnostics** | Agent v0.11.0 | Node Capacity Metrics | Snapshot History Foundation |
-| **Database Management** | Basic DB Host | Host Registry Schema | Backup-First PostgreSQL |
-
----
-
-### ⚡ Quick Setup & Deployment
-
-#### 🐧 Linux Production VPS (v0.13)
-Run the one-line installer directly on your VPS:
 ```bash
-curl -fsSL [https://raw.githubusercontent.com/OWNER/REPO/main/install.sh](https://raw.githubusercontent.com/OWNER/REPO/main/install.sh) | sudo bash
+curl -fsSL https://raw.githubusercontent.com/navindusasmitha/crakhost-control/main/install.sh | sudo bash
+```
+
+The v0.51 installer generates production secrets, creates the real initial admin account, removes development seed access, starts the stack, verifies panel/CrakNode health and attempts HTTPS setup.
+
+Detailed deployment guide: [`docs/VPS_DEPLOY.md`](docs/VPS_DEPLOY.md)
+
+## Update an existing VPS
+
+```bash
+sudo /opt/crakhost/scripts/update-production.sh
+```
+
+The updater creates an `.env` copy and compressed PostgreSQL backup before changing the running release.
+
+## Local development
+
+```bash
+cp .env.example .env
+npm install
+npm run dev
+```
+
+Panel: `http://127.0.0.1:4310`
+
+## Main services
+
+- `panel` — Next.js control panel
+- `postgres` — primary application database
+- `redis` — application cache/session support
+- `craknode` — Docker runtime/provisioning agent
+- `commerce-cleanup` — expires stale unpaid orders
+- optional CrakMail services via `docker-compose.mail.yml`
+
+## Repository
+
+`navindusasmitha/crakhost-control`
