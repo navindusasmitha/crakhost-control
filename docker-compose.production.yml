@@ -22,9 +22,6 @@ services:
       - "127.0.0.1:4310:4310"
     volumes:
       - /run/crakhost-updater:/run/crakhost-updater:ro
-    # The standalone v0.55 panel runs as an unprivileged UID. Give it only the
-    # host updater group's numeric GID so it can connect to the 0660 Unix socket
-    # without making the socket world-accessible or running the panel as root.
     group_add:
       - "${CRAKHOST_UPDATER_GID:-991}"
     depends_on:
@@ -60,6 +57,26 @@ services:
         while true; do
           wget -qO- --timeout=20 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/commerce/cleanup || true
           sleep "$${CRAKHOST_COMMERCE_CLEANUP_SECONDS:-3600}"
+        done
+    networks: [crakhost]
+
+  alert-dispatcher:
+    image: alpine:3.20
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      CRAKHOST_CRON_SECRET: ${CRAKHOST_CRON_SECRET:?CRAKHOST_CRON_SECRET is required}
+    depends_on:
+      panel:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        sleep 75
+        while true; do
+          wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/alerts/dispatch || true
+          sleep 60
         done
     networks: [crakhost]
 
