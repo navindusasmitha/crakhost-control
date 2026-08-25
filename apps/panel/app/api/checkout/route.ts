@@ -75,39 +75,44 @@ export async function POST(req:NextRequest){
     return NextResponse.json({error:e.message||'Checkout failed'},{status:409});
   }finally{client.release()}
 
-  try{
-    const locked=await withOrderProvisionLock(order.id,async()=>{
+  const locked=await withOrderProvisionLock(order.id,async()=>{
+    try{
       await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1 and status='PAID'",[order.id]);
       const env:any={CRAKHOST_GAME:config.game,CRAKHOST_SOFTWARE:config.software};if(config.game==='minecraft'&&config.software!=='default')env.TYPE=config.software.toUpperCase();
       const server=await provisionServer({ownerId:user.id,name:serverName,templateSlug,memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),planId:plan.id,location:config.location,environment:env});
       await db.query("update orders set status='ACTIVE',server_id=$2,node_id=$3,primary_port=$4,provisioned_at=now(),failure_reason=null,updated_at=now() where id=$1",[order.id,server.id,server.node_id,server.primary_port]);
-      return server;
-    });
-    if(!locked.acquired)return NextResponse.json({ok:false,pending:true,resumable:true,orderId:order.id,status:'PROVISIONING'},{status:202});
-    const server=locked.value;
-    await db.query("insert into notifications(user_id,title,body,kind) values($1,'Server ready',$2,'success')",[user.id,`${serverName} has been provisioned on ${server.node_name}${server.node_location?` (${server.node_location})`:''}.`]);
-    const base=appBase();
-    await Promise.allSettled([
-      sendTemplateEmail('invoice_paid',user.email,{name:user.name,invoice_number:invoiceNumber,currency:plan.currency,amount:price.toFixed(2),billing_url:base?`${base}/billing`:''}),
-      sendTemplateEmail('server_ready',user.email,{name:user.name,server_name:serverName,node_name:server.node_name||'',server_url:base?`${base}/servers/${server.identifier}`:''}),
-    ]);
-    return NextResponse.json({ok:true,orderId:order.id,identifier:server.identifier,node:server.node_name,location:server.node_location},{status:201});
-  }catch(e:any){
-    const msg=String(e?.message||e).slice(0,700);const c=await db.connect();let refunded=false;
-    try{
-      await c.query('begin');
-      const state=await c.query('select status from orders where id=$1 for update',[order.id]);
-      if(state.rows[0]?.status!=='FAILED'&&state.rows[0]?.status!=='ACTIVE'){
-        await c.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);
-        await c.query('update users set credits=credits+$2 where id=$1',[user.id,price]);
-        await c.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'REFUND',$3,'order',$4)`,[user.id,price,`Automatic refund: ${plan.name} provisioning failed`,order.id]);
-        await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[order.id]);
-        await c.query("insert into notifications(user_id,title,body,kind) values($1,'Provisioning failed',$2,'error')",[user.id,`${serverName} could not be provisioned. Your wallet payment was refunded automatically.`]);
-        refunded=true;
-      }
-      await c.query('commit');
-    }catch{await c.query('rollback').catch(()=>{})}finally{c.release()}
-    if(refunded)await sendTemplateEmail('payment_refunded',user.email,{name:user.name,server_name:serverName,currency:plan.currency,amount:price.toFixed(2),reason:msg,billing_url:appBase()?`${appBase()}/billing`:''}).catch(e2=>console.warn('[mail] refund delivery failed',e2?.message||e2));
-    return NextResponse.json({error:`Provisioning failed and wallet was refunded: ${msg}`,orderId:order.id},{status:502});
+      return {ok:true as const,server};
+    }catch(e:any){
+      const msg=String(e?.message||e).slice(0,700);const c=await db.connect();let refunded=false;
+      try{
+        await c.query('begin');
+        const state=await c.query('select status from orders where id=$1 for update',[order.id]);
+        if(state.rows[0]?.status!=='FAILED'&&state.rows[0]?.status!=='ACTIVE'){
+          await c.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);
+          await c.query('update users set credits=credits+$2 where id=$1',[user.id,price]);
+          await c.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'REFUND',$3,'order',$4)`,[user.id,price,`Automatic refund: ${plan.name} provisioning failed`,order.id]);
+          await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[order.id]);
+          await c.query("insert into notifications(user_id,title,body,kind) values($1,'Provisioning failed',$2,'error')",[user.id,`${serverName} could not be provisioned. Your wallet payment was refunded automatically.`]);
+          refunded=true;
+        }
+        await c.query('commit');
+      }catch{await c.query('rollback').catch(()=>{})}finally{c.release()}
+      return {ok:false as const,msg,refunded};
+    }
+  });
+
+  if(!locked.acquired)return NextResponse.json({ok:false,pending:true,resumable:true,orderId:order.id,status:'PROVISIONING'},{status:202});
+  if(!locked.value.ok){
+    if(locked.value.refunded)await sendTemplateEmail('payment_refunded',user.email,{name:user.name,server_name:serverName,currency:plan.currency,amount:price.toFixed(2),reason:locked.value.msg,billing_url:appBase()?`${appBase()}/billing`:''}).catch(e=>console.warn('[mail] refund delivery failed',e?.message||e));
+    return NextResponse.json({error:`Provisioning failed and wallet was refunded: ${locked.value.msg}`,orderId:order.id},{status:502});
   }
+
+  const server=locked.value.server;
+  await db.query("insert into notifications(user_id,title,body,kind) values($1,'Server ready',$2,'success')",[user.id,`${serverName} has been provisioned on ${server.node_name}${server.node_location?` (${server.node_location})`:''}.`]);
+  const base=appBase();
+  await Promise.allSettled([
+    sendTemplateEmail('invoice_paid',user.email,{name:user.name,invoice_number:invoiceNumber,currency:plan.currency,amount:price.toFixed(2),billing_url:base?`${base}/billing`:''}),
+    sendTemplateEmail('server_ready',user.email,{name:user.name,server_name:serverName,node_name:server.node_name||'',server_url:base?`${base}/servers/${server.identifier}`:''}),
+  ]);
+  return NextResponse.json({ok:true,orderId:order.id,identifier:server.identifier,node:server.node_name,location:server.node_location},{status:201});
 }
