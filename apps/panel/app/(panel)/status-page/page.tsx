@@ -1,2 +1,3 @@
 import StatusPageManager from '../../../components/StatusPageManager';
-export default function Page(){return <StatusPageManager/>}
+import NotificationSettingsPanel from '../../../components/NotificationSettingsPanel';
+export default function Page(){return <><StatusPageManager/><NotificationSettingsPanel/></>}
