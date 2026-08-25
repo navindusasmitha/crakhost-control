@@ -26,6 +26,8 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: '1'
         run: npm run build
+      - name: Build standalone production image
+        run: docker build -f docker/panel.Dockerfile -t crakhost-panel-ci .
 
   database-migrations:
     runs-on: ubuntu-24.04
@@ -91,6 +93,8 @@ jobs:
       - name: Compile CrakNode
         working-directory: services/craknode
         run: go test ./...
+      - name: Build lightweight CrakNode image
+        run: docker build -f services/craknode/Dockerfile -t craknode-ci .
 
   crakmail-build:
     runs-on: ubuntu-24.04
