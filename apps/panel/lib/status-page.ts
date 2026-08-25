@@ -5,6 +5,7 @@ export type StatusComponent={id:string;name:string;source:string;enabled:boolean
 export type StatusIncident={id:string;title:string;message:string;severity:'maintenance'|'minor'|'major';status:'investigating'|'identified'|'monitoring'|'resolved';createdAt:string;updatedAt:string;resolvedAt?:string|null};
 export type StatusConfig={enabled:boolean;domain:string;title:string;description:string;logoUrl:string;refreshSeconds:number;components:StatusComponent[];incidents:StatusIncident[]};
 
+type SafeRows={rows:any[];error:string|null};
 const LOGO='https://i.ibb.co/sv3BkwyS/logo-Photoroom.png';
 export const DEFAULT_STATUS_CONFIG:StatusConfig={
   enabled:true,
@@ -50,12 +51,21 @@ export function normalizeStatusConfig(raw:any):StatusConfig{
   };
 }
 
-export async function getStatusConfig(){
-  const {rows}=await db.query(`select value from system_settings where key='public_status' limit 1`);
-  return normalizeStatusConfig(rows[0]?.value||{});
+function errorText(error:any){return String(error instanceof Error?error.message:error||'unknown error').slice(0,240)}
+async function safeRows(sql:string,params:any[]=[]):Promise<SafeRows>{
+  try{return{rows:(await db.query(sql,params)).rows,error:null}}
+  catch(error){const message=errorText(error);console.error('[CrakHost Status] telemetry query failed:',message);return{rows:[],error:message}}
 }
 
-function dayKey(date:Date){return date.toISOString().slice(0,10)}
+export async function getStatusConfig(){
+  try{const {rows}=await db.query(`select value from system_settings where key='public_status' limit 1`);return normalizeStatusConfig(rows[0]?.value||{})}
+  catch(error){console.error('[CrakHost Status] configuration read failed:',errorText(error));return normalizeStatusConfig(DEFAULT_STATUS_CONFIG)}
+}
+
+function dayKey(value:any):string|null{
+  if(typeof value==='string'){const match=value.match(/^\d{4}-\d{2}-\d{2}/);if(match)return match[0]}
+  const date=new Date(value);return Number.isFinite(date.getTime())?date.toISOString().slice(0,10):null;
+}
 function currentNodeStatus(node:any):PublicStatus{
   if(!node?.enabled)return'maintenance';
   const last=node.last_seen_at?new Date(node.last_seen_at).getTime():0;
@@ -71,27 +81,32 @@ function worst(values:PublicStatus[]):PublicStatus{
 
 export async function buildPublicStatus(){
   const config=await getStatusConfig();
-  const nodesQ=await db.query(`select id,name,location,enabled,last_seen_at from nodes order by name`);
+  const [nodesQ,historyQ,databaseQ]=await Promise.all([
+    safeRows(`select id,name,location,enabled,last_seen_at from nodes order by name`),
+    safeRows(`select node_id,to_char(date_trunc('day',created_at),'YYYY-MM-DD') day,count(*)::int samples,count(*) filter(where status='online')::int online from node_health_snapshots where created_at>=now()-interval '30 days' group by node_id,2 order by 2`),
+    safeRows(`select 1 as ok`)
+  ]);
   const nodes=nodesQ.rows;
-  const historyQ=await db.query(`select node_id,date_trunc('day',created_at)::date day,count(*)::int samples,count(*) filter(where status='online')::int online from node_health_snapshots where created_at>=now()-interval '30 days' group by node_id,2 order by 2`);
   const history=historyQ.rows;
-  const days=Array.from({length:30},(_,i)=>{const d=new Date();d.setUTCHours(0,0,0,0);d.setUTCDate(d.getUTCDate()-(29-i));return dayKey(d)});
+  const databaseHealthy=!databaseQ.error;
+  const nodeInventoryHealthy=!nodesQ.error;
+  const historyHealthy=!historyQ.error;
+  const days=Array.from({length:30},(_,i)=>{const d=new Date();d.setUTCHours(0,0,0,0);d.setUTCDate(d.getUTCDate()-(29-i));return d.toISOString().slice(0,10)});
 
   const components=config.components.filter(c=>c.enabled).map(c=>{
     let status:PublicStatus='operational';let detail='Operational';let relevant:any[]=history;
-    if(c.source==='panel'){status='operational';detail='Control panel is responding';relevant=[]}
-    else if(c.source==='database'){status='operational';detail='Database is responding';relevant=[]}
+    if(c.source==='panel'){status='operational';detail='Public status endpoint is responding';relevant=[]}
+    else if(c.source==='database'){status=databaseHealthy?'operational':'outage';detail=databaseHealthy?'Database is responding':'Database telemetry unavailable';relevant=[]}
     else if(c.source==='nodes'){
-      const states=nodes.filter(n=>n.enabled).map(currentNodeStatus);status=states.length?worst(states):'maintenance';
-      const online=nodes.filter(n=>currentNodeStatus(n)==='operational').length;detail=`${online}/${nodes.length} nodes operational`;
+      if(!nodeInventoryHealthy){status='outage';detail='CrakNode inventory telemetry unavailable'}
+      else{const enabled=nodes.filter(n=>n.enabled);const states=enabled.map(currentNodeStatus);status=states.length?worst(states):'maintenance';const online=enabled.filter(n=>currentNodeStatus(n)==='operational').length;detail=`${online}/${enabled.length} nodes operational`}
     }else if(c.source.startsWith('node:')){
-      const id=c.source.slice(5);const n=nodes.find(x=>String(x.id)===id);status=n?currentNodeStatus(n):'outage';detail=n?`${n.name} · ${n.location||'Unknown location'}`:'Node no longer exists';relevant=history.filter(h=>String(h.node_id)===id);
+      const id=c.source.slice(5);const n=nodes.find(x=>String(x.id)===id);
+      if(!nodeInventoryHealthy){status='outage';detail='Node telemetry unavailable';relevant=[]}
+      else{status=n?currentNodeStatus(n):'outage';detail=n?`${n.name} · ${n.location||'Unknown location'}`:'Node no longer exists';relevant=history.filter(h=>String(h.node_id)===id)}
     }else{status=cleanStatus(c.manualStatus);detail=status==='operational'?'Operational':status==='maintenance'?'Maintenance':status==='degraded'?'Degraded performance':'Service disruption';relevant=[]}
     const historyBars=days.map(day=>{
-      if(c.source==='nodes'){
-        const rows=relevant.filter(h=>dayKey(new Date(h.day))===day);const samples=rows.reduce((s,h)=>s+Number(h.samples||0),0),online=rows.reduce((s,h)=>s+Number(h.online||0),0);return{day,uptime:samples?Math.round((online/samples)*1000)/10:null};
-      }
-      if(c.source.startsWith('node:')){const rows=relevant.filter(h=>dayKey(new Date(h.day))===day);const samples=rows.reduce((s,h)=>s+Number(h.samples||0),0),online=rows.reduce((s,h)=>s+Number(h.online||0),0);return{day,uptime:samples?Math.round((online/samples)*1000)/10:null};}
+      if((c.source==='nodes'||c.source.startsWith('node:'))&&historyHealthy){const rows=relevant.filter(h=>dayKey(h.day)===day);const samples=rows.reduce((s,h)=>s+Number(h.samples||0),0),online=rows.reduce((s,h)=>s+Number(h.online||0),0);return{day,uptime:samples?Math.round((online/samples)*1000)/10:null}}
       return{day,uptime:null};
     });
     const known=historyBars.filter(x=>x.uptime!==null);const uptime30d=known.length?Math.round(known.reduce((s,x)=>s+Number(x.uptime),0)/known.length*100)/100:null;
@@ -101,5 +116,5 @@ export async function buildPublicStatus(){
   const activeIncidents=incidents.filter(i=>i.status!=='resolved');
   let overall=worst(components.map(c=>c.status));
   if(activeIncidents.some(i=>i.severity==='major'))overall='outage';else if(activeIncidents.some(i=>i.severity==='minor')&&overall==='operational')overall='degraded';else if(activeIncidents.some(i=>i.severity==='maintenance')&&overall==='operational')overall='maintenance';
-  return {enabled:config.enabled,domain:config.domain,title:config.title,description:config.description,logoUrl:config.logoUrl,refreshSeconds:config.refreshSeconds,overall,components,incidents:incidents.slice(0,20),activeIncidents,generatedAt:new Date().toISOString(),monitoringSince:'v0.58.0'};
+  return {enabled:config.enabled,domain:config.domain,title:config.title,description:config.description,logoUrl:config.logoUrl,refreshSeconds:config.refreshSeconds,overall,components,incidents:incidents.slice(0,20),activeIncidents,generatedAt:new Date().toISOString(),monitoringSince:'v0.58.0',telemetry:{database:databaseHealthy,nodes:nodeInventoryHealthy,history:historyHealthy}};
 }
