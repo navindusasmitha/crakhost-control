@@ -22,6 +22,11 @@ services:
       - "127.0.0.1:4310:4310"
     volumes:
       - /run/crakhost-updater:/run/crakhost-updater:ro
+    # The standalone v0.55 panel runs as an unprivileged UID. Give it only the
+    # host updater group's numeric GID so it can connect to the 0660 Unix socket
+    # without making the socket world-accessible or running the panel as root.
+    group_add:
+      - "${CRAKHOST_UPDATER_GID:-991}"
     depends_on:
       postgres:
         condition: service_healthy

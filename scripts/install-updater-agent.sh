@@ -7,6 +7,7 @@ DIR="${CRAKHOST_DIR:-/opt/crakhost}"
 SOURCE="${CRAKHOST_UPDATE_SOURCE:-terminal}"
 SERVICE="crakhost-updater.service"
 SOCKET_DIR="/run/crakhost-updater"
+UPDATER_GROUP="crakhost-updater"
 
 [ -f "$DIR/services/updater/server.py" ] || { echo "[CrakHost] Missing updater agent source." >&2; exit 1; }
 [ -f "$DIR/.env" ] || { echo "[CrakHost] Missing $DIR/.env." >&2; exit 1; }
@@ -22,11 +23,31 @@ if ! command -v python3 >/dev/null 2>&1; then
   apt-get install -y python3
 fi
 
+if ! getent group "$UPDATER_GROUP" >/dev/null 2>&1; then
+  groupadd --system "$UPDATER_GROUP"
+fi
+UPDATER_GID="$(getent group "$UPDATER_GROUP" | cut -d: -f3)"
+[ -n "$UPDATER_GID" ] || { echo "[CrakHost] Unable to resolve updater group GID." >&2; exit 1; }
+
+# Persist the numeric GID for Docker Compose group_add. The container does not
+# need a matching group name; Linux checks Unix-socket access by numeric GID.
+TMP_ENV="$(mktemp)"
+awk -v gid="$UPDATER_GID" '
+  BEGIN{done=0}
+  /^CRAKHOST_UPDATER_GID=/{print "CRAKHOST_UPDATER_GID=" gid;done=1;next}
+  {print}
+  END{if(!done)print "CRAKHOST_UPDATER_GID=" gid}
+' "$DIR/.env" > "$TMP_ENV"
+mv "$TMP_ENV" "$DIR/.env"
+chmod 600 "$DIR/.env"
+
 mkdir -p "$SOCKET_DIR" /var/lib/crakhost-updater /var/log/crakhost /etc/crakhost
-chmod 755 "$SOCKET_DIR" /var/lib/crakhost-updater /var/log/crakhost
+chown root:"$UPDATER_GROUP" "$SOCKET_DIR"
+chmod 750 "$SOCKET_DIR"
+chmod 755 /var/lib/crakhost-updater /var/log/crakhost
 touch /var/log/crakhost/updater.log
 chmod 640 /var/log/crakhost/updater.log
-printf 'CRAKHOST_DEPLOY_TOKEN=%s\n' "$DEPLOY_TOKEN" > /etc/crakhost/updater.env
+printf 'CRAKHOST_DEPLOY_TOKEN=%s\nCRAKHOST_UPDATER_GID=%s\n' "$DEPLOY_TOKEN" "$UPDATER_GID" > /etc/crakhost/updater.env
 chmod 600 /etc/crakhost/updater.env
 
 cat > "/etc/systemd/system/$SERVICE" <<UNIT
@@ -39,7 +60,7 @@ Requires=docker.service
 [Service]
 Type=simple
 User=root
-Group=root
+Group=$UPDATER_GROUP
 WorkingDirectory=$DIR
 EnvironmentFile=/etc/crakhost/updater.env
 Environment=CRAKHOST_DIR=$DIR
@@ -77,4 +98,10 @@ if [ "$READY" -ne 1 ]; then
   exit 1
 fi
 
-echo "[CrakHost] In-panel updater agent ready: $SOCKET_DIR/updater.sock"
+# The service primary group owns newly-created sockets. Keep the intended mode
+# explicit for upgraded hosts whose currently running pre-v0.55.1 agent may
+# have created the socket as root:root before this installer was applied.
+chown root:"$UPDATER_GROUP" "$SOCKET_DIR/updater.sock"
+chmod 660 "$SOCKET_DIR/updater.sock"
+
+echo "[CrakHost] In-panel updater agent ready: $SOCKET_DIR/updater.sock (gid $UPDATER_GID)"
