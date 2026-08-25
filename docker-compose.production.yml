@@ -29,6 +29,27 @@ services:
         condition: service_completed_successfully
     networks: [crakhost]
 
+  commerce-cleanup:
+    image: alpine:3.20
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      CRAKHOST_CRON_SECRET: ${CRAKHOST_CRON_SECRET:?CRAKHOST_CRON_SECRET is required}
+      CRAKHOST_COMMERCE_CLEANUP_SECONDS: ${CRAKHOST_COMMERCE_CLEANUP_SECONDS:-3600}
+    depends_on:
+      panel:
+        condition: service_started
+    command:
+      - /bin/sh
+      - -c
+      - |
+        sleep 60
+        while true; do
+          wget -qO- --timeout=20 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/commerce/cleanup || true
+          sleep "$${CRAKHOST_COMMERCE_CLEANUP_SECONDS:-3600}"
+        done
+    networks: [crakhost]
+
 networks:
   crakhost:
     name: crakhost
