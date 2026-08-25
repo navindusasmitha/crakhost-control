@@ -4,7 +4,7 @@ import {db} from '@/lib/db';
 export const dynamic='force-dynamic';
 export const runtime='nodejs';
 
-const VERSION='0.51.0';
+const VERSION='0.51.1';
 
 export async function GET(){
   const started=Date.now();
