@@ -32,10 +32,10 @@ export async function POST(_req:NextRequest,{params}:{params:Promise<{id:string}
   const {id}=await params;if(!id)return NextResponse.json({error:'Order id is required.'},{status:400});
   const first=await orderRow(id,user.id);if(!first)return NextResponse.json({error:'Order not found.'},{status:404});
   if(first.status==='ACTIVE'&&first.identifier)return activeResponse(first);
-  if(first.status==='PENDING')return NextResponse.json({error:'This order has not been paid. Complete a new checkout after adding wallet credits.',code:'ORDER_UNPAID'},{status:409});
+  if(first.status==='PENDING')return NextResponse.json({error:'This order has not been confirmed as paid yet.',code:'ORDER_UNPAID'},{status:409});
   if(['FAILED','CANCELLED'].includes(String(first.status)))return NextResponse.json({error:`This order is ${String(first.status).toLowerCase()} and cannot be resumed.`,code:'ORDER_FINAL'},{status:409});
   if(!['PAID','PROVISIONING'].includes(String(first.status)))return NextResponse.json({error:`Order state ${first.status} cannot be resumed.`,code:'ORDER_NOT_RESUMABLE'},{status:409});
-  if(!['wallet','test_card'].includes(String(first.payment_method)))return NextResponse.json({error:'Automatic recovery is not enabled for this payment method. Contact support so payment settlement can be verified safely.',code:'PAYMENT_REVIEW_REQUIRED'},{status:409});
+  if(!['wallet','test_card','payhere'].includes(String(first.payment_method)))return NextResponse.json({error:'Automatic recovery is not enabled for this payment method. Contact support so payment settlement can be verified safely.',code:'PAYMENT_REVIEW_REQUIRED'},{status:409});
 
   const locked=await withOrderProvisionLock(id,async()=>{
     const order=await orderRow(id,user.id);if(!order)return {kind:'missing' as const};
@@ -57,7 +57,7 @@ export async function POST(_req:NextRequest,{params}:{params:Promise<{id:string}
       await db.query("update orders set status='ACTIVE',server_id=$2,node_id=$3,primary_port=$4,provisioned_at=coalesce(provisioned_at,now()),failure_reason=null,updated_at=now() where id=$1",[id,server.id,server.node_id,server.primary_port]);
       return {kind:'success' as const,server,order};
     }catch(e:any){
-      const msg=String(e?.message||e).slice(0,800);const c=await db.connect();let refunded=false;
+      const msg=String(e?.message||e).slice(0,800);const c=await db.connect();let refunded=false,reviewRequired=false;
       try{
         await c.query('begin');
         const state=await c.query('select status,payment_method,amount,currency from orders where id=$1 for update',[id]);
@@ -67,14 +67,21 @@ export async function POST(_req:NextRequest,{params}:{params:Promise<{id:string}
           if(live.payment_method==='wallet'){
             await c.query('update users set credits=credits+$2 where id=$1',[user.id,Number(live.amount)]);
             await c.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'REFUND',$3,'order',$4)`,[user.id,Number(live.amount),`Automatic refund: interrupted ${order.plan_name} provisioning failed`,id]);
+            await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[id]);
+            refunded=true;
+          }else if(live.payment_method==='test_card'){
+            await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[id]);
+            refunded=true;
+          }else if(live.payment_method==='payhere'){
+            await c.query(`update orders set metadata=coalesce(metadata,'{}'::jsonb)||jsonb_build_object('paymentReviewRequired',true) where id=$1`,[id]);
+            reviewRequired=true;
           }
-          await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[id]);
-          await c.query("insert into notifications(user_id,title,body,kind) values($1,'Provisioning recovery failed',$2,'error')",[user.id,live.payment_method==='wallet'?`${order.server_name} could not be recovered. Your wallet payment was refunded automatically.`:`${order.server_name} could not be recovered. The sandbox invoice was marked refunded.`]);
-          refunded=true;
+          const body=live.payment_method==='wallet'?`${order.server_name} could not be recovered. Your wallet payment was refunded automatically.`:live.payment_method==='test_card'?`${order.server_name} could not be recovered. The sandbox invoice was marked refunded.`:`${order.server_name} could not be provisioned after PayHere payment. Your payment remains recorded and staff must retry provisioning or process a gateway refund.`;
+          await c.query("insert into notifications(user_id,title,body,kind) values($1,'Provisioning recovery failed',$2,'error')",[user.id,body]);
         }
         await c.query('commit');
       }catch{await c.query('rollback').catch(()=>{})}finally{c.release()}
-      return {kind:'failed' as const,msg,refunded,paymentMethod:String(order.payment_method),amount:Number(order.amount),currency:String(order.currency)};
+      return {kind:'failed' as const,msg,refunded,reviewRequired,paymentMethod:String(order.payment_method),amount:Number(order.amount),currency:String(order.currency)};
     }
   });
 
@@ -86,12 +93,13 @@ export async function POST(_req:NextRequest,{params}:{params:Promise<{id:string}
   if(result.kind==='retryable')return NextResponse.json({error:`Provisioning is temporarily unavailable: ${result.msg}`,code:'PROVISIONING_RETRYABLE',paid:true,resumable:true,orderId:id},{status:409});
   if(result.kind==='failed'){
     if(result.refunded&&result.paymentMethod==='wallet')await sendTemplateEmail('payment_refunded',user.email,{name:user.name,server_name:first.server_name,currency:result.currency,amount:result.amount.toFixed(2),reason:result.msg,billing_url:appBase()?`${appBase()}/billing`:''}).catch(e=>console.warn('[mail] recovery refund delivery failed',e?.message||e));
-    return NextResponse.json({error:`Provisioning recovery failed${result.paymentMethod==='wallet'?' and wallet payment was refunded':''}: ${result.msg}`,orderId:id},{status:502});
+    if(result.reviewRequired)await emitWebhookEvent(user.id,'payment.review_required',{order_id:id,payment_method:'payhere',reason:'provisioning_failed_after_payment',error:result.msg}).catch(()=>null);
+    return NextResponse.json({error:result.reviewRequired?`PayHere payment remains confirmed, but provisioning failed and staff review is required: ${result.msg}`:`Provisioning recovery failed${result.paymentMethod==='wallet'?' and wallet payment was refunded':''}: ${result.msg}`,code:result.reviewRequired?'PAYMENT_REVIEW_REQUIRED':'PROVISIONING_FAILED',paid:true,reviewRequired:result.reviewRequired,orderId:id},{status:502});
   }
 
   const server=result.server;
   await db.query("insert into notifications(user_id,title,body,kind) values($1,'Server recovered',$2,'success')",[user.id,`${result.order.server_name} provisioning resumed successfully on ${server.node_name}${server.node_location?` (${server.node_location})`:''}.`]).catch(()=>{});
-  await audit(user.id,'order.provision.resume','order',id,{server:server.identifier,nodeId:server.node_id}).catch(()=>{});
+  await audit(user.id,'order.provision.resume','order',id,{server:server.identifier,nodeId:server.node_id,paymentMethod:result.order.payment_method}).catch(()=>{});
   await emitWebhookEvent(user.id,'server.provisioned',{server:server.identifier,name:server.name,node_id:server.node_id,recovered:true}).catch(()=>null);
   const base=appBase();
   await sendTemplateEmail('server_ready',user.email,{name:user.name,server_name:result.order.server_name,node_name:server.node_name||'',server_url:base?`${base}/servers/${server.identifier}`:''}).catch(e=>console.warn('[mail] recovery server-ready delivery failed',e?.message||e));
