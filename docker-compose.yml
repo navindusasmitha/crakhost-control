@@ -23,9 +23,10 @@ services:
     networks: [crakhost]
 
   craknode:
-    image: golang:1.23-alpine
+    build:
+      context: .
+      dockerfile: services/craknode/Dockerfile
     restart: unless-stopped
-    working_dir: /app
     environment:
       CRAKNODE_TOKEN: ${CRAKNODE_TOKEN:?CRAKNODE_TOKEN is required}
       CRAKNODE_BACKUP_DIR: /backups
@@ -46,16 +47,14 @@ services:
       CRAKNODE_AUTO_PERFORMANCE: ${CRAKNODE_AUTO_PERFORMANCE:-true}
       CRAKNODE_PERFORMANCE_INTERVAL: ${CRAKNODE_PERFORMANCE_INTERVAL:-15}
     volumes:
-      - ./services/craknode:/app:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - craknode_backups:/backups
-    command: sh -c "apk add --no-cache docker-cli wget >/dev/null && go run ."
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- --header='Authorization: Bearer '$$CRAKNODE_TOKEN http://127.0.0.1:8089/health >/dev/null || exit 1"]
       interval: 10s
       timeout: 4s
       retries: 12
-      start_period: 25s
+      start_period: 15s
     networks: [crakhost]
 
 volumes:
