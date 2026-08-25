@@ -67,7 +67,7 @@ export async function POST(req:NextRequest){
       try{
         await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1 and status='PAID'",[order.id]);
         const env:any={CRAKHOST_GAME:config.game,CRAKHOST_SOFTWARE:config.software};if(config.game==='minecraft'&&config.software!=='default')env.TYPE=config.software.toUpperCase();
-        const server=await provisionServer({ownerId:user.id,name:serverName,templateSlug,memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),planId:plan.id,location:config.location,environment:env});
+        const server=await provisionServer({ownerId:user.id,name:serverName,templateSlug,memoryMb:Number(plan.memory_mb),cpu:Number(plan.cpu_limit),diskMb:Number(plan.disk_mb),planId:plan.id,orderId:order.id,location:config.location,environment:env});
         await db.query("update orders set status='ACTIVE',server_id=$2,node_id=$3,primary_port=$4,provisioned_at=now(),failure_reason=null,updated_at=now() where id=$1",[order.id,server.id,server.node_id,server.primary_port]);
         return {ok:true as const,server};
       }catch(e:any){

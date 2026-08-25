@@ -55,7 +55,7 @@ export async function POST(req:NextRequest){
   const locked=await withOrderProvisionLock(order.id,async()=>{
     try{
       await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1 and status='PAID'",[order.id]);
-      const server=await provisionServer({ownerId:u.id,name,templateSlug,memoryMb:Number(p.memory_mb),cpu:Number(p.cpu_limit),diskMb:Number(p.disk_mb),nodeId,port,planId:p.id});
+      const server=await provisionServer({ownerId:u.id,name,templateSlug,memoryMb:Number(p.memory_mb),cpu:Number(p.cpu_limit),diskMb:Number(p.disk_mb),nodeId,port,planId:p.id,orderId:order.id});
       await db.query("update orders set status='ACTIVE',server_id=$2,node_id=$3,primary_port=$4,provisioned_at=now(),failure_reason=null,updated_at=now() where id=$1",[order.id,server.id,server.node_id,server.primary_port]);
       return {ok:true as const,server};
     }catch(e:any){
