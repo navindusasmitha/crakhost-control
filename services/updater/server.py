@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.55.3"
+VERSION = "0.56.0"
 SOCKET_PATH = Path(os.getenv("CRAKHOST_UPDATER_SOCKET", "/run/crakhost-updater/updater.sock"))
 STATE_PATH = Path(os.getenv("CRAKHOST_UPDATER_STATE", "/var/lib/crakhost-updater/state.json"))
 HISTORY_PATH = Path(os.getenv("CRAKHOST_UPDATER_HISTORY", "/var/lib/crakhost-updater/history.json"))
@@ -26,6 +26,7 @@ COMPOSE_PROJECT = os.getenv("CRAKHOST_COMPOSE_PROJECT", "crakhost-control")
 TOKEN = os.getenv("CRAKHOST_DEPLOY_TOKEN", "")
 LOCK = threading.RLock()
 ONE_SHOT_SERVICES = {"migrate"}
+RESTARTABLE_SERVICES = {"craknode", "commerce-cleanup", "crakmail", "roundcube"}
 
 
 def now_iso():
@@ -212,6 +213,39 @@ def run_command(args, timeout=6):
         return 1, "", str(exc)
 
 
+def restart_service(service):
+    service = str(service or "").strip().lower()
+    if service not in RESTARTABLE_SERVICES:
+        return None, "Service is not approved for in-panel restart."
+    with LOCK:
+        state = normalized_state()
+        if state.get("status") == "running":
+            return None, "A privileged update or maintenance job is currently running."
+    code, out, err = run_command([
+        "docker", "ps", "-a",
+        "--filter", f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+        "--filter", f"label=com.docker.compose.service={service}",
+        "--format", "{{.ID}}",
+    ], timeout=8)
+    if code != 0:
+        return None, err or "Unable to locate service container."
+    container_ids = [line.strip() for line in out.splitlines() if line.strip()]
+    if not container_ids:
+        return None, f"No container found for service {service}."
+    started = now_iso()
+    append_log(f"[Updater Agent] Restricted restart requested for service {service} at {started}.")
+    for container_id in container_ids:
+        code, _, err = run_command(["docker", "restart", container_id], timeout=45)
+        if code != 0:
+            append_history({"job_id": uuid.uuid4().hex, "job_kind": "service_restart", "service": service, "status": "failed", "started_at": started, "finished_at": now_iso(), "exit_code": code})
+            return None, err or f"Failed to restart {service}."
+    finished = now_iso()
+    job_id = uuid.uuid4().hex
+    append_history({"job_id": job_id, "job_kind": "service_restart", "service": service, "status": "success", "started_at": started, "finished_at": finished, "exit_code": 0})
+    append_log(f"[Updater Agent] Restricted restart completed for service {service}.")
+    return {"ok": True, "job_id": job_id, "job_kind": "service_restart", "service": service, "status": "success", "started_at": started, "finished_at": finished, "exit_code": 0, "agent_version": VERSION}, None
+
+
 def read_cpu_snapshot():
     fields = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0].split()[1:]
     values = [int(x) for x in fields]
@@ -337,6 +371,7 @@ def docker_services():
                 "raw_status": parts[1],
                 "service": service,
                 "state": state,
+                "restartable": service in RESTARTABLE_SERVICES,
             })
     services.sort(key=lambda x: x.get("service", ""))
     return services, None
@@ -406,6 +441,7 @@ def collect_metrics():
         "docker_reclaimable_bytes": reclaimable_bytes,
         "docker_cleanup_recommended": cleanup_recommended,
         "services": services,
+        "restartable_services": sorted(RESTARTABLE_SERVICES),
         "warnings": warnings,
         "collected_at": now_iso(),
     }
@@ -466,6 +502,15 @@ class Handler(BaseHTTPRequestHandler):
             state, error = start_job("update", UPDATE_SCRIPT, {"CRAKHOST_UPDATE_SOURCE": "panel"})
         elif self.path == "/maintenance/cleanup":
             state, error = start_job("maintenance", MAINTENANCE_SCRIPT, {"CRAKHOST_MAINTENANCE_SOURCE": "panel"})
+        elif self.path.startswith("/service/restart/"):
+            service = self.path.rsplit("/", 1)[-1]
+            result, restart_error = restart_service(service)
+            if restart_error:
+                status = 409 if "currently running" in restart_error else 400 if "approved" in restart_error else 500
+                self.send_json(status, {"error": restart_error, "service": service, "agent_version": VERSION})
+            else:
+                self.send_json(200, result)
+            return
         else:
             self.send_json(404, {"error": "Not found."})
             return

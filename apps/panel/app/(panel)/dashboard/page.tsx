@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import {Server as ServerIcon,Plus,Activity,Cpu,MemoryStick,HardDrive,Wallet,TerminalSquare,Gamepad2,ArrowUpRight} from 'lucide-react';
+import {Server as ServerIcon,Plus,Cpu,MemoryStick,Wallet,TerminalSquare,Gamepad2,ArrowUpRight,Boxes,TriangleAlert,LifeBuoy,PackageOpen,Wrench,Activity} from 'lucide-react';
 import {db} from '@/lib/db';
 import {nodeFetchFor} from '@/lib/node';
 import {getCurrentUser,isStaff} from '@/lib/auth';
@@ -27,8 +27,21 @@ export default async function Dashboard(){
   let consoleLines:string[]=[];
   if(first){try{const logs=await nodeFetchFor(first,`/v1/servers/${encodeURIComponent(first.identifier)}/logs`);consoleLines=Array.isArray(logs?.lines)?logs.lines.slice(-10):[]}catch{}}
 
+  let ops:any=null;
+  if(staff){
+    const [nodesQ,queueCountQ,ticketsQ,failedQ,settingsQ,queueQ]=await Promise.all([
+      db.query(`select count(*)::int total,count(*) filter(where enabled and last_seen_at>=now()-interval '120 seconds')::int online,count(*) filter(where draining=true)::int draining from nodes`),
+      db.query(`select count(*)::int count from orders where status in ('PENDING','PAID','PROVISIONING')`),
+      db.query(`select count(*)::int open,count(*) filter(where priority in ('HIGH','URGENT'))::int priority from support_tickets where status<>'CLOSED'`),
+      db.query(`select count(*)::int count from orders where status='FAILED' and updated_at>=now()-interval '24 hours'`),
+      db.query(`select value from system_settings where key='operations'`),
+      db.query(`select o.id,o.server_name,o.status,o.updated_at,u.name customer,p.name plan from orders o join users u on u.id=o.user_id left join plans p on p.id=o.plan_id where o.status in ('PENDING','PAID','PROVISIONING','FAILED') order by case o.status when 'PROVISIONING' then 0 when 'PAID' then 1 when 'PENDING' then 2 else 3 end,o.updated_at desc limit 6`)
+    ]);
+    ops={nodes:nodesQ.rows[0]||{},queue:Number(queueCountQ.rows[0]?.count||0),tickets:ticketsQ.rows[0]||{},failed24:Number(failedQ.rows[0]?.count||0),settings:settingsQ.rows[0]?.value||{},queueRows:queueQ.rows};
+  }
+
   return <>
-    <section className="dashboardHero"><div className="heroCopy"><div className="eyebrow">CONTROL OVERVIEW</div><h1>{staff?'Infrastructure':'Your hosting'} <span>at a glance</span></h1><p>{running} of {servers.length} servers currently running with live CrakNode status checks.</p></div><div className="heroActions"><Link href="/servers" className="btn"><ServerIcon size={14}/>Server fleet</Link><Link href="/checkout" className="btn indigo"><Plus size={14}/>Deploy server</Link></div></section>
+    <section className="dashboardHero"><div className="heroCopy"><div className="eyebrow">CONTROL OVERVIEW</div><h1>{staff?'Infrastructure':'Your hosting'} <span>at a glance</span></h1><p>{staff?'Production fleet, provisioning and incident signals in one view.':`${running} of ${servers.length} servers currently running with live CrakNode status checks.`}</p></div><div className="heroActions">{staff&&<Link href="/operations" className="btn"><Activity size={14}/>Operations</Link>}<Link href="/servers" className="btn"><ServerIcon size={14}/>Server fleet</Link><Link href="/checkout" className="btn indigo"><Plus size={14}/>Deploy server</Link></div></section>
 
     <section className="surfaceGrid">
       <Metric icon={<ServerIcon size={15}/>} label="Servers" value={servers.length} hint={`${running} running`}/>
@@ -36,6 +49,17 @@ export default async function Dashboard(){
       <Metric icon={<MemoryStick size={15}/>} label="Allocated RAM" value={`${gb(totalRam)} GB`} hint={`${gb(totalDisk)} GB disk`}/>
       <Metric icon={<Wallet size={15}/>} label={staff?'Paid this month':'Spend this month'} value={`${currency} ${spend.toLocaleString()}`} hint="Paid invoices only"/>
     </section>
+
+    {staff&&ops&&<>
+      <section className="adminOverview panelSection">
+        <Metric icon={<Boxes size={15}/>} label="Nodes online" value={`${Number(ops.nodes.online||0)}/${Number(ops.nodes.total||0)}`} hint={`${Number(ops.nodes.draining||0)} draining`}/>
+        <Metric icon={<PackageOpen size={15}/>} label="Provisioning queue" value={ops.queue} hint="Pending · paid · provisioning"/>
+        <Metric icon={<LifeBuoy size={15}/>} label="Open support" value={Number(ops.tickets.open||0)} hint={`${Number(ops.tickets.priority||0)} high / urgent`}/>
+        <Metric icon={<TriangleAlert size={15}/>} label="Failed · 24h" value={ops.failed24} hint="Provisioning failures"/>
+      </section>
+      {ops.settings?.maintenanceMode&&<div className="notice panelSection"><Wrench size={14}/><span><b>Maintenance mode enabled.</b> {ops.settings.maintenanceMessage||'Scheduled maintenance in progress.'}</span></div>}
+      <section className="twoCol panelSection"><div className="card adminSurface"><div className="panelSectionHead"><div><h2>Operations pulse</h2><p>Shortcuts for the production control plane.</p></div><span className="liveChip"><i/>ADMIN</span></div><div className="releaseBox"><div className="timelineRow"><span><b>Compute scheduling</b><small>Drain, resume and disable CrakNode capacity.</small></span><Link className="btn" href="/nodes">Nodes</Link></div><div className="timelineRow"><span><b>Platform incidents</b><small>Host health, priority tickets and provisioning failures.</small></span><Link className="btn" href="/operations">Operations</Link></div><div className="timelineRow"><span><b>Production releases</b><small>One-click update, VPS health and safe cleanup.</small></span><Link className="btn" href="/deployment">Deployment</Link></div></div></div><div className="card adminSurface"><div className="panelSectionHead"><div><h2>Provisioning queue</h2><p>Newest orders needing operational attention.</p></div><Link className="btn" href="/admin/orders">All orders</Link></div><div className="timelineList">{ops.queueRows.length?ops.queueRows.map((o:any)=><div className="timelineRow" key={o.id}><span><b>{o.server_name}</b><small>{o.customer} · {o.plan||'Custom plan'} · {ago(o.updated_at)}</small></span><span className={`statusDot ${statusClass(o.status)}`}>{String(o.status).toLowerCase()}</span></div>):<div className="emptyState">Provisioning queue is clear.</div>}</div></div></section>
+    </>}
 
     <section className="panelSection"><div className="panelSectionHead"><div><h2>Server fleet</h2><p>Runtime status and resource use reported by each assigned node.</p></div><span className="liveChip"><i/>LIVE DATA</span></div>{servers.length===0?<div className="nodeEmpty"><Gamepad2 size={28}/><h3>No servers yet</h3><p>Order a plan to provision the first workload.</p><Link href="/checkout" className="btn indigo">Order server</Link></div>:<div className="fleetList">{servers.map((s:any)=>{const cpu=Math.max(0,Math.min(100,Number(s.live?.cpu||0)));const mem=Number(s.live?.memory||0);const memPct=s.memory_mb?Math.max(0,Math.min(100,mem/Number(s.memory_mb)*100)):0;return <article className="fleetRow" key={s.id}><div className="fleetIdentity"><div className="fleetIcon"><Gamepad2 size={19}/></div><div><b>{s.name}</b><small>{s.primary_ip}:{s.primary_port} · {s.identifier}</small></div></div><div className="fleetCell"><span className={`statusDot ${statusClass(s.status)}`}>{s.status||'unknown'}</span><small>{s.node_name||'Unassigned node'}</small></div><div className="fleetUsage"><div className="fleetUsageLine"><span>CPU</span><b>{cpu.toFixed(1)}%</b></div><div className="fleetBar"><span style={{width:`${cpu}%`}}/></div><small>{trim(Number(s.cpu_limit||0))} vCPU limit</small></div><div className="fleetUsage"><div className="fleetUsageLine"><span>Memory</span><b>{Math.round(mem)} / {Number(s.memory_mb||0)} MB</b></div><div className="fleetBar"><span style={{width:`${memPct}%`}}/></div><small>{gb(Number(s.memory_mb||0))} GB allocation</small></div><Link className="btn" href={`/servers/${s.identifier}`}>Manage <ArrowUpRight size={13}/></Link></article>})}</div>}</section>
 
@@ -46,4 +70,5 @@ export default async function Dashboard(){
 function Metric({icon,label,value,hint}:{icon:React.ReactNode;label:string;value:any;hint:string}){return <div className="surfaceMetric"><div className="surfaceMetricTop"><span>{label}</span>{icon}</div><strong>{value}</strong><small>{hint}</small></div>}
 function gb(mb:number){return Number.isFinite(mb)?Number((mb/1024).toFixed(1)).toString():'0'}
 function trim(v:number){return Number.isFinite(v)?Number(v.toFixed(2)).toString():'0'}
-function statusClass(v:any){const s=String(v||'unknown').toLowerCase();return ['running','active','online','offline','failed','suspended','provisioning','starting'].includes(s)?s:'unknown'}
+function ago(value:any){const t=new Date(value).getTime();if(!Number.isFinite(t))return'unknown';const s=Math.max(0,Math.round((Date.now()-t)/1000));if(s<60)return`${s}s ago`;if(s<3600)return`${Math.floor(s/60)}m ago`;if(s<86400)return`${Math.floor(s/3600)}h ago`;return`${Math.floor(s/86400)}d ago`}
+function statusClass(v:any){const s=String(v||'unknown').toLowerCase();if(s==='failed')return'failed';if(['provisioning','paid','pending','starting'].includes(s))return'provisioning';if(['running','active','online'].includes(s))return'online';if(['offline','suspended'].includes(s))return s;return'unknown'}
