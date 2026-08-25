@@ -99,9 +99,9 @@ rollback_code(){
   echo "[CrakHost] Pre-update database backup: $BACKUP_DIR/crakhost.sql.gz" >&2
 }
 
-echo "[CrakHost] Stage 4/7: building panel..."
-if ! "${COMPOSE[@]}" build panel; then
-  echo "[CrakHost] Candidate panel build failed." >&2
+echo "[CrakHost] Stage 4/7: building lightweight runtime images..."
+if ! "${COMPOSE[@]}" build panel craknode; then
+  echo "[CrakHost] Candidate panel/CrakNode image build failed." >&2
   "${GIT[@]}" reset --hard "$OLD_SHA"
   exit 1
 fi
