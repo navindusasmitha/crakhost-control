@@ -23,7 +23,7 @@ export async function createSession(userId:string){
 }
 export async function getSessionUser(token?:string){
   if(!token) return null;
-  const {rows}=await db.query(`select u.id,u.name,u.email,u.role,u.credits,u.email_verified_at from sessions s join users u on u.id=s.user_id where s.token_hash=$1 and s.expires_at>now() limit 1`,[tokenHash(token)]);
+  const {rows}=await db.query(`select u.id,u.name,u.email,u.role,u.credits,u.email_verified_at,u.account_status from sessions s join users u on u.id=s.user_id where s.token_hash=$1 and s.expires_at>now() and u.account_status='ACTIVE' limit 1`,[tokenHash(token)]);
   return rows[0] ?? null;
 }
 export async function getCurrentUser(){
