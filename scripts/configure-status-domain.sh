@@ -86,6 +86,8 @@ write_https(){
     echo "    ssl_certificate_key $PRIVKEY;"
     echo '    ssl_protocols TLSv1.2 TLSv1.3;'
     echo '    ssl_session_cache shared:CrakHostStatusSSL:10m;'
+    echo '    ssl_session_timeout 1d;'
+    echo '    add_header Strict-Transport-Security "max-age=31536000" always;'
     proxy_locations
     echo '}'
   } > "$SITE"
@@ -98,21 +100,38 @@ cert_matches(){
   [ -s "$FULLCHAIN" ] && [ -s "$PRIVKEY" ] && command -v openssl >/dev/null 2>&1 && openssl x509 -in "$FULLCHAIN" -noout -checkhost "$DOMAIN" 2>/dev/null | grep -q 'does match certificate'
 }
 
-# Always install the dedicated HTTP vhost first. This prevents the status
-# hostname from falling through to the main CrakHost landing-page vhost and
-# also gives ACME a deterministic HTTP server block to work with.
+served_cert_matches(){
+  command -v openssl >/dev/null 2>&1 || return 1
+  local result
+  result="$(timeout 8 openssl s_client -connect 127.0.0.1:443 -servername "$DOMAIN" </dev/null 2>/dev/null | openssl x509 -noout -checkhost "$DOMAIN" 2>/dev/null || true)"
+  grep -q 'does match certificate' <<<"$result"
+}
+
+http_redirect_matches(){
+  command -v curl >/dev/null 2>&1 || return 0
+  curl -sSI --max-time 6 --resolve "$DOMAIN:80:127.0.0.1" "http://$DOMAIN/" 2>/dev/null | tr -d '\r' | grep -qi "^location: https://$DOMAIN/"
+}
+
+verify_live_https(){
+  local ok=1
+  if served_cert_matches; then echo "[CrakHost] Live SNI certificate matches $DOMAIN on 127.0.0.1:443."; else echo "[CrakHost] WARNING: live HTTPS SNI certificate does not match $DOMAIN." >&2; ok=0; fi
+  if http_redirect_matches; then echo "[CrakHost] HTTP -> HTTPS redirect verified for $DOMAIN."; else echo "[CrakHost] WARNING: HTTP -> HTTPS redirect verification failed for $DOMAIN." >&2; ok=0; fi
+  return $((1-ok))
+}
+
 write_http
 echo "[CrakHost] Isolated public status HTTP proxy ready for $DOMAIN."
+DNS_ANSWERS="$(getent ahosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
+[ -n "$DNS_ANSWERS" ] && echo "[CrakHost] DNS answers for $DOMAIN: $DNS_ANSWERS"
 
 if [ "$AUTO_TLS" != "true" ]; then
   echo "[CrakHost] Automatic status TLS is disabled."
   exit 0
 fi
 
-# If a valid dedicated certificate already exists, do not depend on Certbot's
-# nginx rewriter: install an explicit 443 status vhost ourselves every deploy.
 if cert_matches; then
   write_https
+  verify_live_https || true
   echo "[CrakHost] Existing HTTPS certificate attached to dedicated status vhost: https://$DOMAIN"
   exit 0
 fi
@@ -122,9 +141,6 @@ if ! getent ahostsv4 "$DOMAIN" >/dev/null 2>&1 && ! getent ahostsv6 "$DOMAIN" >/
   exit 0
 fi
 
-# A host upgraded from an older CrakHost install may have HTTPS for the panel
-# without the Certbot CLI/plugin. Install the small Ubuntu packages only when
-# they are actually missing.
 if ! command -v certbot >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
     echo "[CrakHost] Certbot is missing; installing certificate tooling..."
@@ -143,10 +159,9 @@ if [ -n "$EMAIL" ]; then CERTBOT_ARGS+=(-m "$EMAIL"); else CERTBOT_ARGS+=(--regi
 
 echo "[CrakHost] Requesting/deploying dedicated certificate for $DOMAIN..."
 if timeout 180 certbot "${CERTBOT_ARGS[@]}"; then
-  # Certbot may rewrite the temporary HTTP file. Replace it once more with our
-  # deterministic isolated 80/443 vhosts, using only the status certificate.
   if cert_matches; then
     write_https
+    verify_live_https || true
     echo "[CrakHost] HTTPS status routing verified: https://$DOMAIN"
   else
     echo "[CrakHost] Certbot completed but the resulting certificate does not match $DOMAIN; keeping HTTP status routing only." >&2
