@@ -11,5 +11,5 @@
     "start": "npm --workspace apps/panel run start",
     "worker": "npm --workspace apps/worker run start"
   },
-  "version": "0.55.1"
+  "version": "0.55.2"
 }
