@@ -28,6 +28,7 @@ const adminItems:Item[]=[
  {href:'/deployment',label:'Deployment',icon:Rocket},
  {href:'/developer',label:'Developer',icon:Code2},
 ];
+const LOGO='https://i.ibb.co/sv3BkwyS/logo-Photoroom.png';
 
 export default function Sidebar({staff,admin}:{staff:boolean;admin:boolean}){
  const path=usePathname();
@@ -35,7 +36,7 @@ export default function Sidebar({staff,admin}:{staff:boolean;admin:boolean}){
  const group=(title:string,items:Item[])=><><div className="navTitle">{title}</div>{items.map(i=>{const Icon=i.icon;return <Link key={i.href} href={i.href} className={active(i)?'active':''}><Icon size={17}/><span>{i.label}</span></Link>})}</>;
  const visibleAdmin=adminItems.filter(i=>!i.adminOnly||admin);
  return <aside className="sidebar">
-   <Link href="/dashboard" className="brand"><img src="https://i.ibb.co/pv5zb3Q5/logo-Photoroom.png" alt="CrakHost" style={{height:38,width:'auto',objectFit:'contain'}}/><span>CRAK<span style={{color:'#a78bfa'}}>HOST</span></span></Link>
+   <Link href="/dashboard" className="brand"><img src={LOGO} alt="CrakHost" style={{height:44,width:'auto',objectFit:'contain'}}/><span>CRAK<span style={{color:'#a78bfa'}}>HOST</span></span></Link>
    <nav className="nav">{group('WORKSPACE',client)}{group('ACCOUNT',account)}{staff&&group('ADMINISTRATION',visibleAdmin)}</nav>
    <div className="sidebarBottom"><div className="controlVersion"><div className="online"><span className="pulse"/><div><b>CrakHost Control</b><span>production control plane</span></div></div></div></div>
  </aside>
