@@ -30,7 +30,7 @@ export default function OperationsCenter(){
 
   <section className="twoCol panelSection">
    <div className="card adminSurface"><div className="panelSectionHead"><div><h2>Host resource pressure</h2><p>Read-only VPS telemetry from the privileged updater agent.</p></div><span className={`statusDot ${host.health_status==='critical'?'failed':host.health_status==='warning'?'provisioning':'online'}`}>{host.error?'unavailable':host.health_status||'unknown'}</span></div>
-    {host.error?<div className="notice error">{host.error}</div>:<div className="nodeMeters">{Meter('CPU',Cpu,`${cpu.toFixed(1)}%`,CpuIcon)}{Meter('Memory',mem,`${mem.toFixed(1)}%`,MemoryStick)}{Meter('Root disk',disk,`${disk.toFixed(1)}% · ${humanBytes(host.disk?.free_bytes)} free`,HardDrive)}</div>}
+    {host.error?<div className="notice error">{host.error}</div>:<div className="nodeMeters">{Meter('CPU',cpu,`${cpu.toFixed(1)}%`,Cpu)}{Meter('Memory',mem,`${mem.toFixed(1)}%`,MemoryStick)}{Meter('Root disk',disk,`${disk.toFixed(1)}% · ${humanBytes(host.disk?.free_bytes)} free`,HardDrive)}</div>}
     {!host.error&&<div className="small" style={{marginTop:12}}>Uptime {humanDuration(host.uptime_seconds)} · load {Array.isArray(host.load)?host.load.join(' / '):'—'} · updater v{host.agent_version||'unknown'}</div>}
    </div>
    <div className="card adminSurface"><div className="panelSectionHead"><div><h2><Wrench size={14}/> Maintenance control</h2><p>Global maintenance banner and health-history policy.</p></div></div><label className="checkLine"><input type="checkbox" checked={!!d.settings.maintenanceMode} onChange={e=>setD((x:any)=>({...x,settings:{...x.settings,maintenanceMode:e.target.checked}}))}/>Maintenance mode</label><label className="field"><span>Maintenance message</span><input value={d.settings.maintenanceMessage||''} onChange={e=>setD((x:any)=>({...x,settings:{...x.settings,maintenanceMessage:e.target.value}}))}/></label><label className="field"><span>Health history retention (days)</span><input type="number" min="1" max="90" value={d.settings.healthRetentionDays||14} onChange={e=>setD((x:any)=>({...x,settings:{...x.settings,healthRetentionDays:Number(e.target.value)}}))}/></label><button className="btn indigo" onClick={save} disabled={saving}>{saving?<Loader2 size={14} className="spin"/>:<ShieldCheck size={14}/>}Save operations settings</button></div>
@@ -49,7 +49,6 @@ export default function OperationsCenter(){
  </>
 }
 
-const CpuIcon=Cpu;
 function Metric({icon,label,value,hint}:{icon:React.ReactNode;label:string;value:any;hint?:string}){return <div className="surfaceMetric"><div className="surfaceMetricTop"><span>{label}</span>{icon}</div><strong>{value}</strong>{hint&&<small>{hint}</small>}</div>}
 function Meter(label:string,pct:number,value:string,icon:any){const Icon=icon;return <div className="nodeMeter"><div className="nodeMeterHead"><span><Icon size={11} style={{verticalAlign:'middle'}}/> {label}</span><b>{value}</b></div><div className="nodeBar"><span style={{width:`${Math.max(0,Math.min(100,Number(pct||0)))}%`}}/></div></div>}
 function humanBytes(value:any){const n0=Number(value);if(!Number.isFinite(n0)||n0<0)return'—';const u=['B','KiB','MiB','GiB','TiB'];let n=n0,i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return`${n>=10||i===0?n.toFixed(0):n.toFixed(1)} ${u[i]}`}
