@@ -102,6 +102,7 @@ jobs:
           bash -n install.sh
           bash -n scripts/update-production.sh
           bash -n scripts/install-updater-agent.sh
+          bash -n scripts/maintenance-cleanup.sh
           bash -n scripts/repair-production.sh
           bash -n services/crakmail/entrypoint.sh
           bash -n services/crakmail/sync-dkim.sh
@@ -113,13 +114,17 @@ jobs:
           TOKEN=ci-deploy-token-012345678901234567890123456789
           rm -rf /tmp/crakhost-updater-ci
           mkdir -p /tmp/crakhost-updater-ci
-          printf '#!/usr/bin/env bash\nexit 0\n' > /tmp/crakhost-updater-ci/true.sh
-          chmod +x /tmp/crakhost-updater-ci/true.sh
+          printf '#!/usr/bin/env bash\necho update-ok\nexit 0\n' > /tmp/crakhost-updater-ci/update.sh
+          printf '#!/usr/bin/env bash\necho cleanup-ok\nexit 0\n' > /tmp/crakhost-updater-ci/cleanup.sh
+          chmod +x /tmp/crakhost-updater-ci/update.sh /tmp/crakhost-updater-ci/cleanup.sh
           CRAKHOST_DEPLOY_TOKEN="$TOKEN" \
           CRAKHOST_UPDATER_SOCKET=/tmp/crakhost-updater-ci/updater.sock \
           CRAKHOST_UPDATER_STATE=/tmp/crakhost-updater-ci/state.json \
+          CRAKHOST_UPDATER_HISTORY=/tmp/crakhost-updater-ci/history.json \
           CRAKHOST_UPDATER_LOG=/tmp/crakhost-updater-ci/updater.log \
-          CRAKHOST_UPDATE_SCRIPT=/tmp/crakhost-updater-ci/true.sh \
+          CRAKHOST_UPDATE_SCRIPT=/tmp/crakhost-updater-ci/update.sh \
+          CRAKHOST_MAINTENANCE_SCRIPT=/tmp/crakhost-updater-ci/cleanup.sh \
+          CRAKHOST_BACKUP_ROOT=/tmp/crakhost-updater-ci/backups \
           CRAKHOST_UPDATE_ROOT="$GITHUB_WORKSPACE" \
           python3 services/updater/server.py &
           AGENT_PID=$!
@@ -128,10 +133,15 @@ jobs:
             [ -S /tmp/crakhost-updater-ci/updater.sock ] && break
             sleep 0.2
           done
-          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock -H "x-crakhost-deploy-token: $TOKEN" http://localhost/health >/dev/null
-          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock -H "x-crakhost-deploy-token: $TOKEN" -X POST http://localhost/update >/dev/null
+          AUTH=(-H "x-crakhost-deploy-token: $TOKEN")
+          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock "${AUTH[@]}" http://localhost/health >/dev/null
+          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock "${AUTH[@]}" http://localhost/metrics | grep -q '"cpu_percent"'
+          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock "${AUTH[@]}" -X POST http://localhost/update >/dev/null
           sleep 0.5
-          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock -H "x-crakhost-deploy-token: $TOKEN" http://localhost/status | grep -q '"status": "success"'
+          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock "${AUTH[@]}" http://localhost/status | grep -q '"status": "success"'
+          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock "${AUTH[@]}" -X POST http://localhost/maintenance/cleanup >/dev/null
+          sleep 0.5
+          curl -fsS --unix-socket /tmp/crakhost-updater-ci/updater.sock "${AUTH[@]}" http://localhost/status | grep -q '"job_kind": "maintenance"'
       - name: Build CrakMail image
         run: docker build -f services/crakmail/Dockerfile -t crakmail-ci .
       - name: Validate production Compose overlays

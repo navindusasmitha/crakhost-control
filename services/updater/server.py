@@ -2,20 +2,26 @@
 import hmac
 import json
 import os
+import shutil
 import socketserver
 import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.52.0"
+VERSION = "0.53.0"
 SOCKET_PATH = Path(os.getenv("CRAKHOST_UPDATER_SOCKET", "/run/crakhost-updater/updater.sock"))
 STATE_PATH = Path(os.getenv("CRAKHOST_UPDATER_STATE", "/var/lib/crakhost-updater/state.json"))
+HISTORY_PATH = Path(os.getenv("CRAKHOST_UPDATER_HISTORY", "/var/lib/crakhost-updater/history.json"))
 LOG_PATH = Path(os.getenv("CRAKHOST_UPDATER_LOG", "/var/log/crakhost/updater.log"))
 UPDATE_SCRIPT = os.getenv("CRAKHOST_UPDATE_SCRIPT", "/opt/crakhost/scripts/update-production.sh")
+MAINTENANCE_SCRIPT = os.getenv("CRAKHOST_MAINTENANCE_SCRIPT", "/opt/crakhost/scripts/maintenance-cleanup.sh")
 UPDATE_ROOT = os.getenv("CRAKHOST_UPDATE_ROOT", "/opt/crakhost")
+BACKUP_ROOT = Path(os.getenv("CRAKHOST_BACKUP_ROOT", "/var/backups/crakhost"))
+COMPOSE_PROJECT = os.getenv("CRAKHOST_COMPOSE_PROJECT", "crakhost-control")
 TOKEN = os.getenv("CRAKHOST_DEPLOY_TOKEN", "")
 LOCK = threading.RLock()
 
@@ -28,6 +34,7 @@ def default_state():
     return {
         "status": "idle",
         "job_id": None,
+        "job_kind": None,
         "pid": None,
         "started_at": None,
         "finished_at": None,
@@ -53,6 +60,22 @@ def save_state(state):
     os.replace(tmp, STATE_PATH)
 
 
+def load_history():
+    try:
+        data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def append_history(entry):
+    HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    history = [entry, *load_history()][:20]
+    tmp = HISTORY_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    os.replace(tmp, HISTORY_PATH)
+
+
 def pid_alive(pid):
     if not isinstance(pid, int) or pid <= 0:
         return False
@@ -69,12 +92,11 @@ def normalized_state():
         if state.get("status") == "running" and not pid_alive(state.get("pid")):
             state["status"] = "interrupted"
             state["finished_at"] = state.get("finished_at") or now_iso()
-            state["exit_code"] = state.get("exit_code")
             save_state(state)
         return state
 
 
-def tail_log(max_bytes=65536, max_lines=160):
+def tail_log(max_bytes=65536, max_lines=180):
     try:
         with LOG_PATH.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -105,31 +127,37 @@ def watch_process(proc, job_id):
         state["exit_code"] = code
         state["pid"] = None
         save_state(state)
+        append_history({
+            "job_id": state.get("job_id"),
+            "job_kind": state.get("job_kind"),
+            "status": state.get("status"),
+            "started_at": state.get("started_at"),
+            "finished_at": state.get("finished_at"),
+            "exit_code": code,
+        })
     append_log(f"[Updater Agent] Job {job_id} finished with exit code {code}.")
 
 
-def start_update():
-    if not Path(UPDATE_SCRIPT).is_file():
-        return None, "Update script is missing."
+def start_job(kind, script_path, extra_env=None):
+    script = Path(script_path)
+    if not script.is_file():
+        return None, f"{kind.title()} script is missing."
 
     with LOCK:
         state = normalized_state()
         if state.get("status") == "running":
-            return state, "An update is already running."
+            return state, "Another privileged CrakHost job is already running."
 
         job_id = uuid.uuid4().hex
-        append_log(
-            "\n"
-            + "=" * 72
-            + f"\n[Updater Agent] Starting job {job_id} at {now_iso()}\n"
-        )
+        append_log("\n" + "=" * 72 + f"\n[Updater Agent] Starting {kind} job {job_id} at {now_iso()}\n")
         log_handle = LOG_PATH.open("a", encoding="utf-8")
         env = os.environ.copy()
-        env["CRAKHOST_UPDATE_SOURCE"] = "panel"
+        if extra_env:
+            env.update(extra_env)
         env["CRAKHOST_UPDATE_JOB_ID"] = job_id
         try:
             proc = subprocess.Popen(
-                ["/usr/bin/bash", UPDATE_SCRIPT],
+                ["/usr/bin/bash", str(script)],
                 cwd=UPDATE_ROOT,
                 env=env,
                 stdout=log_handle,
@@ -139,11 +167,12 @@ def start_update():
             )
         except Exception as exc:
             log_handle.close()
-            return None, f"Unable to launch updater: {exc}"
+            return None, f"Unable to launch {kind}: {exc}"
 
         state = {
             "status": "running",
             "job_id": job_id,
+            "job_kind": kind,
             "pid": proc.pid,
             "started_at": now_iso(),
             "finished_at": None,
@@ -151,14 +180,150 @@ def start_update():
             "agent_version": VERSION,
         }
         save_state(state)
-        thread = threading.Thread(target=watch_process, args=(proc, job_id), daemon=True)
-        thread.start()
+        threading.Thread(target=watch_process, args=(proc, job_id), daemon=True).start()
         log_handle.close()
         return state, None
 
 
+def run_command(args, timeout=6):
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except Exception as exc:
+        return 1, "", str(exc)
+
+
+def read_cpu_snapshot():
+    fields = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0].split()[1:]
+    values = [int(x) for x in fields]
+    idle = values[3] + (values[4] if len(values) > 4 else 0)
+    return sum(values), idle
+
+
+def cpu_percent():
+    try:
+        total1, idle1 = read_cpu_snapshot()
+        time.sleep(0.12)
+        total2, idle2 = read_cpu_snapshot()
+        delta_total = total2 - total1
+        delta_idle = idle2 - idle1
+        return round(max(0.0, min(100.0, 100.0 * (delta_total - delta_idle) / max(1, delta_total))), 1)
+    except Exception:
+        return None
+
+
+def memory_metrics():
+    values = {}
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, raw = line.split(":", 1)
+            values[key] = int(raw.strip().split()[0]) * 1024
+        total = values.get("MemTotal", 0)
+        available = values.get("MemAvailable", values.get("MemFree", 0))
+        used = max(0, total - available)
+        percent = round(used * 100 / total, 1) if total else None
+        return {"total_bytes": total, "used_bytes": used, "available_bytes": available, "percent": percent}
+    except Exception:
+        return {"total_bytes": 0, "used_bytes": 0, "available_bytes": 0, "percent": None}
+
+
+def directory_size(path):
+    if not path.exists():
+        return 0
+    code, out, _ = run_command(["du", "-sb", str(path)], timeout=8)
+    if code == 0 and out:
+        try:
+            return int(out.split()[0])
+        except Exception:
+            pass
+    return None
+
+
+def docker_df():
+    code, out, err = run_command(["docker", "system", "df", "--format", "{{json .}}"], timeout=8)
+    if code != 0:
+        return [], err or "docker system df failed"
+    records = []
+    for line in out.splitlines():
+        try:
+            value = json.loads(line)
+            if isinstance(value, dict):
+                records.append(value)
+        except Exception:
+            continue
+    return records, None
+
+
+def docker_services():
+    template = '{{.Names}}\t{{.Status}}\t{{.Label "com.docker.compose.service"}}'
+    code, out, err = run_command([
+        "docker", "ps", "-a",
+        "--filter", f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+        "--format", template,
+    ], timeout=8)
+    if code != 0:
+        return [], err or "docker ps failed"
+    services = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            services.append({"name": parts[0], "status": parts[1], "service": parts[2] or parts[0]})
+    services.sort(key=lambda x: x.get("service", ""))
+    return services, None
+
+
+def collect_metrics():
+    disk = shutil.disk_usage("/")
+    disk_percent = round(disk.used * 100 / disk.total, 1) if disk.total else None
+    memory = memory_metrics()
+    docker_usage, docker_error = docker_df()
+    services, services_error = docker_services()
+    warnings = []
+    if disk_percent is not None and disk_percent >= 85:
+        warnings.append(f"Root disk usage is high at {disk_percent}%.")
+    if disk.free < 10 * 1024**3:
+        warnings.append("Less than 10 GiB is free on the root filesystem.")
+    if memory.get("percent") is not None and memory["percent"] >= 90:
+        warnings.append(f"Memory usage is high at {memory['percent']}%.")
+    for service in services:
+        status = service.get("status", "").lower()
+        if "unhealthy" in status or status.startswith("exited") or status.startswith("dead"):
+            warnings.append(f"Service {service.get('service')} reports {service.get('status')}.")
+    if docker_error:
+        warnings.append(f"Docker storage metrics unavailable: {docker_error}")
+    if services_error:
+        warnings.append(f"Docker service metrics unavailable: {services_error}")
+    try:
+        load = [round(x, 2) for x in os.getloadavg()]
+    except Exception:
+        load = []
+    try:
+        uptime = int(float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0]))
+    except Exception:
+        uptime = None
+    return {
+        "ok": True,
+        "agent_version": VERSION,
+        "cpu_percent": cpu_percent(),
+        "memory": memory,
+        "disk": {
+            "total_bytes": disk.total,
+            "used_bytes": disk.used,
+            "free_bytes": disk.free,
+            "percent": disk_percent,
+        },
+        "backup_bytes": directory_size(BACKUP_ROOT),
+        "load": load,
+        "uptime_seconds": uptime,
+        "docker_df": docker_usage,
+        "services": services,
+        "warnings": warnings,
+        "collected_at": now_iso(),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CrakHostUpdater/0.52"
+    server_version = "CrakHostUpdater/0.53"
 
     def log_message(self, *_):
         return
@@ -187,24 +352,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/health":
             state = normalized_state()
-            self.send_json(200, {
-                "ok": True,
-                "service": "crakhost-updater",
-                "agent_version": VERSION,
-                "status": state.get("status"),
-            })
+            self.send_json(200, {"ok": True, "service": "crakhost-updater", "agent_version": VERSION, "status": state.get("status")})
             return
         if self.path == "/status":
             state = normalized_state()
-            self.send_json(200, {**state, "log_tail": tail_log()})
+            self.send_json(200, {**state, "history": load_history(), "log_tail": tail_log()})
+            return
+        if self.path == "/metrics":
+            self.send_json(200, collect_metrics())
             return
         self.send_json(404, {"error": "Not found."})
 
     def do_POST(self):
         if not self.require_auth():
-            return
-        if self.path != "/update":
-            self.send_json(404, {"error": "Not found."})
             return
         length = int(self.headers.get("content-length", "0") or "0")
         if length > 4096:
@@ -213,14 +373,21 @@ class Handler(BaseHTTPRequestHandler):
         if length:
             self.rfile.read(length)
 
-        state, error = start_update()
+        if self.path == "/update":
+            state, error = start_job("update", UPDATE_SCRIPT, {"CRAKHOST_UPDATE_SOURCE": "panel"})
+        elif self.path == "/maintenance/cleanup":
+            state, error = start_job("maintenance", MAINTENANCE_SCRIPT, {"CRAKHOST_MAINTENANCE_SOURCE": "panel"})
+        else:
+            self.send_json(404, {"error": "Not found."})
+            return
+
         if error and state and state.get("status") == "running":
-            self.send_json(409, {**state, "error": error, "log_tail": tail_log()})
+            self.send_json(409, {**state, "error": error, "history": load_history(), "log_tail": tail_log()})
             return
         if error:
-            self.send_json(500, {"error": error, "status": "failed", "log_tail": tail_log()})
+            self.send_json(500, {"error": error, "status": "failed", "history": load_history(), "log_tail": tail_log()})
             return
-        self.send_json(202, {**state, "log_tail": tail_log()})
+        self.send_json(202, {**state, "history": load_history(), "log_tail": tail_log()})
 
 
 class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -230,15 +397,14 @@ class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
 def main():
     if len(TOKEN) < 32 or TOKEN.startswith("replace-with-"):
         raise SystemExit("CRAKHOST_DEPLOY_TOKEN is missing or unsafe.")
-
     SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         SOCKET_PATH.unlink()
     except FileNotFoundError:
         pass
-
     normalized_state()
     with UnixHTTPServer(str(SOCKET_PATH), Handler) as server:
         os.chmod(SOCKET_PATH, 0o660)
