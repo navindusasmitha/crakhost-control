@@ -4,6 +4,7 @@ import {db} from '@/lib/db';
 import {preflightProvisioning,provisionServer} from '@/lib/provision';
 import {audit} from '@/lib/audit';
 import {emitWebhookEvent} from '@/lib/webhooks';
+import {withOrderProvisionLock} from '@/lib/order-provision-lock';
 
 function requestKey(req:NextRequest,b:any){return String(b.requestKey||req.headers.get('idempotency-key')||'').trim().slice(0,160)}
 async function replay(userId:string,key:string){
@@ -15,7 +16,7 @@ async function replay(userId:string,key:string){
   if(x.status==='ACTIVE'&&x.identifier)return NextResponse.json({ok:true,replayed:true,orderId:x.id,identifier:x.identifier,node:x.node_name,location:x.node_location},{status:200});
   if(x.status==='FAILED')return NextResponse.json({error:`This order attempt already failed: ${x.failure_reason||'provisioning failed'}`,replayed:true,orderId:x.id},{status:409});
   if(x.status==='CANCELLED')return NextResponse.json({error:'This order attempt was cancelled.',replayed:true,orderId:x.id},{status:409});
-  return NextResponse.json({ok:false,replayed:true,pending:true,orderId:x.id,status:x.status},{status:202});
+  return NextResponse.json({ok:false,replayed:true,pending:true,resumable:true,orderId:x.id,status:x.status},{status:202});
 }
 
 export async function GET(){
@@ -51,28 +52,37 @@ export async function POST(req:NextRequest){
     return NextResponse.json({error:e.message||'Order failed'},{status:409});
   }finally{client.release()}
 
-  try{
-    await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1",[order.id]);
-    const s=await provisionServer({ownerId:u.id,name,templateSlug,memoryMb:Number(p.memory_mb),cpu:Number(p.cpu_limit),diskMb:Number(p.disk_mb),nodeId,port,planId:p.id});
-    await db.query("update orders set status='ACTIVE',server_id=$2,node_id=$3,primary_port=$4,provisioned_at=now(),updated_at=now() where id=$1",[order.id,s.id,s.node_id,s.primary_port]);
-    await db.query("insert into notifications(user_id,title,body,kind) values($1,'Server ready',$2,'success')",[u.id,`${name} has been provisioned on ${s.node_name}${s.node_location?` (${s.node_location})`:''}.`]).catch(()=>{});
-    await audit(u.id,'order.provision','order',order.id,{server:s.identifier,plan:p.slug,source:'billing-orders'});
-    await emitWebhookEvent(u.id,'invoice.paid',{invoice_number:invoice,order_id:order.id,amount,currency:p.currency,server:s.identifier}).catch(()=>null);
-    await emitWebhookEvent(u.id,'server.provisioned',{server:s.identifier,name:s.name,node_id:s.node_id}).catch(()=>null);
-    return NextResponse.json({ok:true,orderId:order.id,identifier:s.identifier,node:s.node_name,location:s.node_location},{status:201});
-  }catch(e:any){
-    const msg=String(e?.message||e).slice(0,800);const c=await db.connect();
+  const locked=await withOrderProvisionLock(order.id,async()=>{
     try{
-      await c.query('begin');
-      const locked=await c.query('select status from orders where id=$1 for update',[order.id]);
-      if(locked.rows[0]?.status!=='FAILED'){
-        await c.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);
-        await c.query('update users set credits=credits+$2 where id=$1',[u.id,amount]);
-        await c.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'REFUND',$3,'order',$4)`,[u.id,amount,`Automatic refund: ${p.name} provisioning failed`,order.id]);
-        await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[order.id]);
-      }
-      await c.query('commit');
-    }catch{await c.query('rollback').catch(()=>{})}finally{c.release()}
-    return NextResponse.json({error:`Provisioning failed and credits were refunded: ${msg}`,orderId:order.id},{status:502});
-  }
+      await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1 and status='PAID'",[order.id]);
+      const server=await provisionServer({ownerId:u.id,name,templateSlug,memoryMb:Number(p.memory_mb),cpu:Number(p.cpu_limit),diskMb:Number(p.disk_mb),nodeId,port,planId:p.id});
+      await db.query("update orders set status='ACTIVE',server_id=$2,node_id=$3,primary_port=$4,provisioned_at=now(),failure_reason=null,updated_at=now() where id=$1",[order.id,server.id,server.node_id,server.primary_port]);
+      return {ok:true as const,server};
+    }catch(e:any){
+      const msg=String(e?.message||e).slice(0,800);const c=await db.connect();let refunded=false;
+      try{
+        await c.query('begin');
+        const state=await c.query('select status from orders where id=$1 for update',[order.id]);
+        if(state.rows[0]?.status!=='FAILED'&&state.rows[0]?.status!=='ACTIVE'){
+          await c.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);
+          await c.query('update users set credits=credits+$2 where id=$1',[u.id,amount]);
+          await c.query(`insert into wallet_transactions(user_id,amount,type,description,reference_type,reference_id) values($1,$2,'REFUND',$3,'order',$4)`,[u.id,amount,`Automatic refund: ${p.name} provisioning failed`,order.id]);
+          await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[order.id]);
+          refunded=true;
+        }
+        await c.query('commit');
+      }catch{await c.query('rollback').catch(()=>{})}finally{c.release()}
+      return {ok:false as const,msg,refunded};
+    }
+  });
+
+  if(!locked.acquired)return NextResponse.json({ok:false,pending:true,resumable:true,orderId:order.id,status:'PROVISIONING'},{status:202});
+  if(!locked.value.ok)return NextResponse.json({error:`Provisioning failed and credits were refunded: ${locked.value.msg}`,orderId:order.id},{status:502});
+
+  const s=locked.value.server;
+  await db.query("insert into notifications(user_id,title,body,kind) values($1,'Server ready',$2,'success')",[u.id,`${name} has been provisioned on ${s.node_name}${s.node_location?` (${s.node_location})`:''}.`]).catch(()=>{});
+  await audit(u.id,'order.provision','order',order.id,{server:s.identifier,plan:p.slug,source:'billing-orders'});
+  await emitWebhookEvent(u.id,'invoice.paid',{invoice_number:invoice,order_id:order.id,amount,currency:p.currency,server:s.identifier}).catch(()=>null);
+  await emitWebhookEvent(u.id,'server.provisioned',{server:s.identifier,name:s.name,node_id:s.node_id}).catch(()=>null);
+  return NextResponse.json({ok:true,orderId:order.id,identifier:s.identifier,node:s.node_name,location:s.node_location},{status:201});
 }
