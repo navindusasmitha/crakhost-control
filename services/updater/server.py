@@ -2,6 +2,7 @@
 import hmac
 import json
 import os
+import re
 import shutil
 import socketserver
 import subprocess
@@ -12,7 +13,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.53.0"
+VERSION = "0.54.0"
 SOCKET_PATH = Path(os.getenv("CRAKHOST_UPDATER_SOCKET", "/run/crakhost-updater/updater.sock"))
 STATE_PATH = Path(os.getenv("CRAKHOST_UPDATER_STATE", "/var/lib/crakhost-updater/state.json"))
 HISTORY_PATH = Path(os.getenv("CRAKHOST_UPDATER_HISTORY", "/var/lib/crakhost-updater/history.json"))
@@ -24,6 +25,7 @@ BACKUP_ROOT = Path(os.getenv("CRAKHOST_BACKUP_ROOT", "/var/backups/crakhost"))
 COMPOSE_PROJECT = os.getenv("CRAKHOST_COMPOSE_PROJECT", "crakhost-control")
 TOKEN = os.getenv("CRAKHOST_DEPLOY_TOKEN", "")
 LOCK = threading.RLock()
+ONE_SHOT_SERVICES = {"migrate"}
 
 
 def now_iso():
@@ -254,6 +256,33 @@ def docker_df():
     return records, None
 
 
+def parse_size_bytes(raw):
+    text = str(raw or "").strip()
+    if not text:
+        return 0
+    token = text.split()[0]
+    match = re.match(r"^([0-9]+(?:\.[0-9]+)?)([kKmMgGtTpP]?[iI]?[bB])?$", token)
+    if not match:
+        return 0
+    value = float(match.group(1))
+    unit = (match.group(2) or "B").upper().replace("IB", "B")
+    factors = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4, "PB": 1024**5}
+    return int(value * factors.get(unit, 1))
+
+
+def classify_service(service, raw_status):
+    service_name = str(service or "").lower()
+    status = str(raw_status or "")
+    lowered = status.lower()
+    if service_name in ONE_SHOT_SERVICES and lowered.startswith("exited (0)"):
+        return "completed", "Up · completed successfully"
+    if "unhealthy" in lowered or lowered.startswith("dead") or lowered.startswith("exited"):
+        return "error", status
+    if lowered.startswith("up"):
+        return "healthy", status
+    return "unknown", status
+
+
 def docker_services():
     template = '{{.Names}}\t{{.Status}}\t{{.Label "com.docker.compose.service"}}'
     code, out, err = run_command([
@@ -267,7 +296,15 @@ def docker_services():
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) >= 3:
-            services.append({"name": parts[0], "status": parts[1], "service": parts[2] or parts[0]})
+            service = parts[2] or parts[0]
+            state, display_status = classify_service(service, parts[1])
+            services.append({
+                "name": parts[0],
+                "status": display_status,
+                "raw_status": parts[1],
+                "service": service,
+                "state": state,
+            })
     services.sort(key=lambda x: x.get("service", ""))
     return services, None
 
@@ -279,16 +316,27 @@ def collect_metrics():
     docker_usage, docker_error = docker_df()
     services, services_error = docker_services()
     warnings = []
-    if disk_percent is not None and disk_percent >= 85:
-        warnings.append(f"Root disk usage is high at {disk_percent}%.")
-    if disk.free < 10 * 1024**3:
-        warnings.append("Less than 10 GiB is free on the root filesystem.")
-    if memory.get("percent") is not None and memory["percent"] >= 90:
+    critical = False
+    if disk_percent is not None and disk_percent >= 90:
+        warnings.append(f"Root disk usage is critical at {disk_percent}%.")
+        critical = True
+    elif disk_percent is not None and disk_percent >= 80:
+        warnings.append(f"Root disk usage is elevated at {disk_percent}%.")
+    if disk.free < 8 * 1024**3:
+        warnings.append("Less than 8 GiB is free on the root filesystem.")
+        critical = True
+    if memory.get("percent") is not None and memory["percent"] >= 95:
+        warnings.append(f"Memory usage is critical at {memory['percent']}%.")
+        critical = True
+    elif memory.get("percent") is not None and memory["percent"] >= 90:
         warnings.append(f"Memory usage is high at {memory['percent']}%.")
     for service in services:
-        status = service.get("status", "").lower()
-        if "unhealthy" in status or status.startswith("exited") or status.startswith("dead"):
-            warnings.append(f"Service {service.get('service')} reports {service.get('status')}.")
+        if service.get("state") == "error":
+            warnings.append(f"Service {service.get('service')} reports {service.get('raw_status') or service.get('status')}.")
+            critical = True
+    reclaimable_bytes = sum(parse_size_bytes(item.get("Reclaimable")) for item in docker_usage)
+    if reclaimable_bytes >= 5 * 1024**3:
+        warnings.append("Docker has more than 5 GiB reclaimable; Safe cleanup is recommended.")
     if docker_error:
         warnings.append(f"Docker storage metrics unavailable: {docker_error}")
     if services_error:
@@ -301,9 +349,11 @@ def collect_metrics():
         uptime = int(float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0]))
     except Exception:
         uptime = None
+    health_status = "critical" if critical else "warning" if warnings else "healthy"
     return {
         "ok": True,
         "agent_version": VERSION,
+        "health_status": health_status,
         "cpu_percent": cpu_percent(),
         "memory": memory,
         "disk": {
@@ -316,6 +366,7 @@ def collect_metrics():
         "load": load,
         "uptime_seconds": uptime,
         "docker_df": docker_usage,
+        "docker_reclaimable_bytes": reclaimable_bytes,
         "services": services,
         "warnings": warnings,
         "collected_at": now_iso(),
@@ -323,7 +374,7 @@ def collect_metrics():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CrakHostUpdater/0.53"
+    server_version = "CrakHostUpdater/0.54"
 
     def log_message(self, *_):
         return
