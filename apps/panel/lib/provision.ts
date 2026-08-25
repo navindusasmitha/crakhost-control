@@ -15,6 +15,7 @@ type ProvisionInput={
   location?:string|null;
   port?:number|null;
   planId?:string|null;
+  orderId?:string|null;
   environment?:Record<string,string>;
 };
 
@@ -152,6 +153,20 @@ export async function preflightProvisioning(i:ProvisionPreflightInput){
   };
 }
 
+async function existingOrderReservation(orderId:string|null|undefined){
+  if(!orderId)return null;
+  const q=await db.query(`select s.*,row_to_json(n) node_data
+    from orders o join servers s on s.id=o.server_id join nodes n on n.id=s.node_id
+    where o.id=$1 limit 1`,[orderId]);
+  const row=q.rows[0];if(!row)return null;
+  const node=row.node_data as NodeCandidate;delete row.node_data;
+  if(String(row.status).toLowerCase()==='deleted'){
+    await db.query('update orders set server_id=null,node_id=null,primary_port=null,updated_at=now() where id=$1 and server_id=$2',[orderId,row.id]);
+    return null;
+  }
+  return {server:row,node};
+}
+
 async function reserveServer(node:NodeCandidate,i:ProvisionInput,t:any){
   const client=await db.connect();
   try{
@@ -196,6 +211,11 @@ async function reserveServer(node:NodeCandidate,i:ProvisionInput,t:any){
     `,[i.ownerId,node.id,i.planId||null,i.name,identifier,container,t.image,i.cpu,i.memoryMb,i.diskMb,port]);
     const server=rows[0];
     await client.query('insert into allocations(node_id,ip,port,server_id) values($1,$2,$3,$4)',[node.id,'0.0.0.0',port,server.id]);
+    if(i.orderId){
+      const linked=await client.query(`update orders set server_id=$2,node_id=$3,primary_port=$4,updated_at=now()
+        where id=$1 and server_id is null returning id`,[i.orderId,server.id,node.id,port]);
+      if(!linked.rowCount)throw new Error('Order is already linked to another server reservation');
+    }
     await client.query("insert into service_events(server_id,type,detail) values($1,'provision.reserved',$2)",[server.id,`Capacity and port ${port} reserved on ${node.name}`]);
     await client.query('commit');
     return {...server,primary_port:port};
@@ -215,15 +235,40 @@ async function verifyRuntime(node:NodeCandidate,identifier:string){
       last=await nodeFetchFor(node,`/v1/servers/${encodeURIComponent(identifier)}/status`);
       const state=String(last?.status||'').toLowerCase();
       if(state==='running')return last;
-      if(['dead','exited','removing'].includes(state))throw new Error(`container entered ${state} state`);
+      if(['dead','removing'].includes(state))throw new Error(`container entered ${state} state`);
     }catch(e:any){
       lastError=String(e?.message||e);
-      if(/entered (dead|exited|removing) state/i.test(lastError))throw e;
+      if(/entered (dead|removing) state/i.test(lastError))throw e;
     }
     await new Promise(resolve=>setTimeout(resolve,750));
   }
   const state=String(last?.status||'unknown');
   throw new Error(lastError||`container did not reach running state (last state: ${state})`);
+}
+
+async function runtimeState(node:NodeCandidate,identifier:string){
+  try{return await nodeFetchFor(node,`/v1/servers/${encodeURIComponent(identifier)}/status`)}catch{return {status:'offline'}}
+}
+
+async function ensureRuntime(node:NodeCandidate,server:any,i:ProvisionInput,t:any){
+  const current=await runtimeState(node,server.identifier);
+  const state=String(current?.status||'offline').toLowerCase();
+  if(state==='offline'){
+    const finalCheck=await checkNodeRuntimeCapacity(node,i.diskMb);
+    if(!finalCheck.ok)throw new Error(`Final node capacity check failed: ${finalCheck.reason}`);
+    const env={...(t.environment||{}),...(i.environment||{})};
+    await nodeFetchFor(node,`/v1/servers/${encodeURIComponent(server.identifier)}/create`,{
+      method:'POST',
+      body:JSON.stringify({image:t.image,memoryMb:i.memoryMb,cpu:i.cpu,hostPort:server.primary_port,containerPort:t.internal_port,env}),
+    });
+    await db.query("insert into service_events(server_id,type,detail) values($1,'provision.runtime_created',$2)",[server.id,`CrakNode created ${server.container_name} on ${node.name}`]);
+  }else if(['exited','created'].includes(state)){
+    await nodeFetchFor(node,`/v1/servers/${encodeURIComponent(server.identifier)}/action`,{method:'POST',body:JSON.stringify({action:'start'})});
+    await db.query("insert into service_events(server_id,type,detail) values($1,'provision.runtime_resumed',$2)",[server.id,`Existing CrakNode runtime resumed from ${state}`]).catch(()=>{});
+  }else if(['dead','removing'].includes(state)){
+    throw new Error(`Existing container is in unrecoverable ${state} state`);
+  }
+  return verifyRuntime(node,server.identifier);
 }
 
 async function cleanupFailedProvision(node:NodeCandidate,server:any,reason:string){
@@ -250,31 +295,31 @@ async function cleanupFailedProvision(node:NodeCandidate,server:any,reason:strin
 export async function provisionServer(i:ProvisionInput){
   validateInput(i);
   const t=await template(i.templateSlug);
-  const selected=await chooseNode(i.nodeId,i.location,i.memoryMb,i.cpu,i.diskMb);
-  const node=selected.node;
-  if(!node)throw new Error(capacityError(i,selected.reasons));
+  const existing=await existingOrderReservation(i.orderId);
+  let node:NodeCandidate;
+  let server:any;
+  let resumed=false;
 
-  const server=await reserveServer(node,i,t);
+  if(existing){
+    node=existing.node;server=existing.server;resumed=true;
+    await db.query("insert into service_events(server_id,type,detail) values($1,'provision.resume_requested',$2)",[server.id,`Resuming order-linked reservation on ${node.name}`]).catch(()=>{});
+  }else{
+    const selected=await chooseNode(i.nodeId,i.location,i.memoryMb,i.cpu,i.diskMb);
+    if(!selected.node)throw new Error(capacityError(i,selected.reasons));
+    node=selected.node;
+    server=await reserveServer(node,i,t);
+  }
+
   try{
-    const finalCheck=await checkNodeRuntimeCapacity(node,i.diskMb);
-    if(!finalCheck.ok)throw new Error(`Final node capacity check failed: ${finalCheck.reason}`);
-
-    const env={...(t.environment||{}),...(i.environment||{})};
-    await nodeFetchFor(node,`/v1/servers/${encodeURIComponent(server.identifier)}/create`,{
-      method:'POST',
-      body:JSON.stringify({image:t.image,memoryMb:i.memoryMb,cpu:i.cpu,hostPort:server.primary_port,containerPort:t.internal_port,env}),
-    });
-    await db.query("insert into service_events(server_id,type,detail) values($1,'provision.runtime_created',$2)",[server.id,`CrakNode created ${server.container_name} on ${node.name}`]);
-
-    const runtime=await verifyRuntime(node,server.identifier);
+    const runtime=await ensureRuntime(node,server,i,t);
     await db.query("update servers set status='running',updated_at=now() where id=$1",[server.id]);
-    await db.query("insert into service_events(server_id,type,detail) values($1,'provision.ready',$2)",[server.id,`Runtime verified ${String(runtime?.status||'running')} on ${node.name}${node.location?` (${node.location})`:''}`]);
-    await audit(i.ownerId,'server.provision.success','server',server.id,{identifier:server.identifier,nodeId:node.id,node:node.name,port:server.primary_port}).catch(()=>{});
+    await db.query("insert into service_events(server_id,type,detail) values($1,'provision.ready',$2)",[server.id,`${resumed?'Resumed and verified':'Runtime verified'} ${String(runtime?.status||'running')} on ${node.name}${node.location?` (${node.location})`:''}`]);
+    await audit(i.ownerId,'server.provision.success','server',server.id,{identifier:server.identifier,nodeId:node.id,node:node.name,port:server.primary_port,resumed}).catch(()=>{});
     return {...server,status:'running',node_name:node.name,node_location:node.location,runtime};
   }catch(e:any){
     const msg=String(e?.message||e).slice(0,500);
     const cleanup=await cleanupFailedProvision(node,server,msg);
-    await audit(i.ownerId,'server.provision.failed','server',server.id,{identifier:server.identifier,nodeId:node.id,node:node.name,error:msg,cleanup:cleanup.remoteClean?'complete':'required'}).catch(()=>{});
+    await audit(i.ownerId,'server.provision.failed','server',server.id,{identifier:server.identifier,nodeId:node.id,node:node.name,error:msg,cleanup:cleanup.remoteClean?'complete':'required',resumed}).catch(()=>{});
     if(!cleanup.remoteClean){
       throw new Error(`Docker provisioning failed on ${node.name}: ${msg}. Runtime cleanup also failed; allocation is retained for safety and administrator cleanup is required.`);
     }
