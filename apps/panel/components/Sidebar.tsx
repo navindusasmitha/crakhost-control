@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import {usePathname} from 'next/navigation';
-import {LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart,Receipt,Mail,Mailbox} from 'lucide-react';
+import {LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart,Receipt,Mail,Mailbox,BellRing} from 'lucide-react';
 
 type Item={href:string;label:string;icon:any;adminOnly?:boolean;exact?:boolean};
 const client:Item[]=[
@@ -25,6 +25,7 @@ const adminItems:Item[]=[
  {href:'/nodes',label:'Nodes',icon:Boxes},
  {href:'/infrastructure',label:'Infrastructure',icon:Network},
  {href:'/operations',label:'Operations',icon:ActivitySquare},
+ {href:'/alerts',label:'Alerts',icon:BellRing},
  {href:'/deployment',label:'Deployment',icon:Rocket},
  {href:'/developer',label:'Developer',icon:Code2},
 ];
