@@ -45,7 +45,6 @@ ensure_value(){
   [ -n "$current" ] || set_env "$key" "$fallback"
 }
 
-# Keep old VPS installs compatible with current production services.
 ensure_secret CRAKHOST_CRON_SECRET
 ensure_secret CRAKNODE_REGISTRATION_TOKEN
 ensure_secret CRAKHOST_DEPLOY_TOKEN
@@ -80,8 +79,6 @@ else
   echo "[CrakHost] Updating $OLD_SHA -> $NEW_SHA"
 fi
 
-# The new source may introduce the updater agent itself. A terminal update may
-# restart it; a panel-launched update deliberately leaves its parent agent alive.
 echo "[CrakHost] Stage 3/7: preparing privileged updater agent..."
 CRAKHOST_UPDATE_SOURCE="$SOURCE" bash scripts/install-updater-agent.sh
 
@@ -159,3 +156,17 @@ echo "[CrakHost] Update verified successfully."
 echo "[CrakHost] Backup: $BACKUP_DIR"
 curl -fsS http://127.0.0.1:4310/api/health; echo
 "${COMPOSE[@]}" ps
+
+# A browser-triggered job is owned by the currently running updater agent.
+# Delay the agent restart until after this script exits so its watcher can
+# persist the successful result, then load any newly deployed agent code.
+if [ "$SOURCE" = "panel" ]; then
+  REFRESH_UNIT="crakhost-updater-refresh-${CRAKHOST_UPDATE_JOB_ID:-$(date +%s)}"
+  if command -v systemd-run >/dev/null 2>&1; then
+    systemd-run --quiet --unit="$REFRESH_UNIT" --on-active=5s /bin/systemctl restart crakhost-updater.service >/dev/null 2>&1 || true
+    echo "[CrakHost] Updater agent refresh scheduled."
+  else
+    nohup bash -c 'sleep 5; systemctl restart crakhost-updater.service' >/dev/null 2>&1 &
+    echo "[CrakHost] Updater agent refresh scheduled with fallback launcher."
+  fi
+fi
