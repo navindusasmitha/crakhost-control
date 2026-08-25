@@ -27,6 +27,59 @@ jobs:
           NEXT_TELEMETRY_DISABLED: '1'
         run: npm run build
 
+  database-migrations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: crakhost
+          POSTGRES_USER: crakhost
+          POSTGRES_PASSWORD: ci-postgres-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crakhost -d crakhost"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client
+      - name: Apply fresh schema and migrations twice
+        env:
+          PGPASSWORD: ci-postgres-password
+        run: |
+          DB=(psql -h 127.0.0.1 -U crakhost -d crakhost -v ON_ERROR_STOP=1)
+          "${DB[@]}" -f database/init.sql >/dev/null
+          for pass in 1 2; do
+            echo "Migration pass $pass"
+            for f in $(find database/migrations -maxdepth 1 -type f -name 'v*.sql' | sort -V); do
+              echo "  -> $f"
+              "${DB[@]}" -f "$f" >/dev/null
+            done
+          done
+      - name: Verify v0.50 commerce schema
+        env:
+          PGPASSWORD: ci-postgres-password
+        run: |
+          psql -h 127.0.0.1 -U crakhost -d crakhost -v ON_ERROR_STOP=1 <<'SQL'
+          select idempotency_key from orders limit 0;
+          select server_id,kind,period_start,period_end from invoices limit 0;
+          do $$
+          begin
+            if not exists (
+              select 1 from pg_constraint
+              where conname='invoices_status_check'
+                and pg_get_constraintdef(oid) like '%REFUNDED%'
+            ) then
+              raise exception 'REFUNDED is missing from invoices_status_check';
+            end if;
+          end $$;
+          SQL
+
   craknode-build:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
