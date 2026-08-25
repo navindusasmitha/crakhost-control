@@ -2,7 +2,7 @@
 import Link from 'next/link';
 import {usePathname} from 'next/navigation';
 import {useEffect,useRef} from 'react';
-import {LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart,Receipt,Mail,Mailbox,BellRing} from 'lucide-react';
+import {LayoutDashboard,Server,Database,HardDrive,CreditCard,Settings,Shield,Boxes,Headphones,Code2,ActivitySquare,LockKeyhole,Network,Rocket,ShoppingCart,Receipt,Mail,Mailbox,BellRing,Globe2} from 'lucide-react';
 
 type Item={href:string;label:string;icon:any;adminOnly?:boolean;exact?:boolean};
 const client:Item[]=[
@@ -27,6 +27,7 @@ const adminItems:Item[]=[
  {href:'/infrastructure',label:'Infrastructure',icon:Network},
  {href:'/operations',label:'Operations',icon:ActivitySquare},
  {href:'/alerts',label:'Alerts',icon:BellRing},
+ {href:'/status-page',label:'Status Page',icon:Globe2,adminOnly:true},
  {href:'/deployment',label:'Deployment',icon:Rocket},
  {href:'/developer',label:'Developer',icon:Code2},
 ];
@@ -38,13 +39,6 @@ export default function Sidebar({staff,admin}:{staff:boolean;admin:boolean}){
  const active=(item:Item)=>item.exact?path===item.href:path===item.href||path.startsWith(item.href+'/');
  const group=(title:string,items:Item[])=><><div className="navTitle">{title}</div>{items.map(i=>{const Icon=i.icon;return <Link key={i.href} href={i.href} className={active(i)?'active':''}><Icon size={17}/><span>{i.label}</span></Link>})}</>;
  const visibleAdmin=adminItems.filter(i=>!i.adminOnly||admin);
- useEffect(()=>{
-   const current=navRef.current?.querySelector('a.active');
-   if(current instanceof HTMLElement)current.scrollIntoView({block:'nearest'});
- },[path]);
- return <aside className="sidebar" style={{overflow:'hidden'}}>
-   <Link href="/dashboard" className="brand" style={{flex:'0 0 auto'}}><img src={LOGO} alt="CrakHost" style={{height:44,width:'auto',objectFit:'contain'}}/><span>CRAK<span style={{color:'#a78bfa'}}>HOST</span></span></Link>
-   <nav ref={navRef} className="nav" style={{flex:'1 1 auto',minHeight:0,overflowY:'auto',overflowX:'hidden',overscrollBehavior:'contain',paddingRight:4}}>{group('WORKSPACE',client)}{group('ACCOUNT',account)}{staff&&group('ADMINISTRATION',visibleAdmin)}</nav>
-   <div className="sidebarBottom" style={{flex:'0 0 auto'}}><div className="controlVersion"><div className="online"><span className="pulse"/><div><b>CrakHost Control</b><span>production control plane</span></div></div></div></div>
- </aside>
+ useEffect(()=>{const current=navRef.current?.querySelector('a.active');if(current instanceof HTMLElement)current.scrollIntoView({block:'nearest'})},[path]);
+ return <aside className="sidebar" style={{overflow:'hidden'}}><Link href="/dashboard" className="brand" style={{flex:'0 0 auto'}}><img src={LOGO} alt="CrakHost" style={{height:44,width:'auto',objectFit:'contain'}}/><span>CRAK<span style={{color:'#a78bfa'}}>HOST</span></span></Link><nav ref={navRef} className="nav" style={{flex:'1 1 auto',minHeight:0,overflowY:'auto',overflowX:'hidden',overscrollBehavior:'contain',paddingRight:4}}>{group('WORKSPACE',client)}{group('ACCOUNT',account)}{staff&&group('ADMINISTRATION',visibleAdmin)}</nav><div className="sidebarBottom" style={{flex:'0 0 auto'}}><div className="controlVersion"><div className="online"><span className="pulse"/><div><b>CrakHost Control</b><span>production control plane</span></div></div></div></div></aside>
 }
