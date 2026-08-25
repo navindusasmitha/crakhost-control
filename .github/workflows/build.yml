@@ -61,7 +61,7 @@ jobs:
               "${DB[@]}" -f "$f" >/dev/null
             done
           done
-      - name: Verify v0.50 commerce schema
+      - name: Verify commerce schema
         env:
           PGPASSWORD: ci-postgres-password
         run: |
@@ -99,13 +99,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate shell scripts
         run: |
+          bash -n install.sh
+          bash -n scripts/update-production.sh
+          bash -n scripts/repair-production.sh
           bash -n services/crakmail/entrypoint.sh
           bash -n services/crakmail/sync-dkim.sh
           bash -n scripts/check-crakmail-network.sh
           bash -n scripts/install-crakmail-host.sh
       - name: Build CrakMail image
         run: docker build -f services/crakmail/Dockerfile -t crakmail-ci .
-      - name: Validate mail Compose overlay
+      - name: Validate production Compose overlays
         env:
           POSTGRES_PASSWORD: ci-postgres-password
           MAIL_DOMAIN: example.com
@@ -119,4 +122,5 @@ jobs:
           sed -i 's|^MAIL_DOMAIN=.*|MAIL_DOMAIN=example.com|' .env
           sed -i 's|^MAIL_HOSTNAME=.*|MAIL_HOSTNAME=mail.example.com|' .env
           sed -i 's|^MAIL_PUBLIC_IP=.*|MAIL_PUBLIC_IP=203.0.113.10|' .env
+          docker compose -f docker-compose.yml -f docker-compose.production.yml config >/dev/null
           docker compose -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.mail.yml config >/dev/null
