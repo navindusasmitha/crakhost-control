@@ -7,12 +7,26 @@ import {preflightProvisioning,provisionServer} from '@/lib/provision';
 const successCards=new Set(['4242424242424242','5555555555554444']);
 const declineCards=new Set(['4000000000000002','4000000000009995']);
 function appBase(){const raw=process.env.APP_URL||process.env.PANEL_URL||(process.env.PANEL_DOMAIN?`https://${process.env.PANEL_DOMAIN}`:'');return raw.replace(/\/$/,'')}
+function requestKey(req:NextRequest,b:any){return String(b.requestKey||req.headers.get('idempotency-key')||'').trim().slice(0,160)}
+
+async function replayPayment(userId:string,key:string){
+  if(!key)return null;
+  const {rows}=await db.query(`select o.id,o.status,o.failure_reason,s.identifier,n.name node_name,n.location node_location
+    from orders o left join servers s on s.id=o.server_id left join nodes n on n.id=o.node_id
+    where o.user_id=$1 and o.idempotency_key=$2 limit 1`,[userId,key]);
+  const x=rows[0];if(!x)return null;
+  if(x.status==='ACTIVE'&&x.identifier)return NextResponse.json({ok:true,replayed:true,orderId:x.id,identifier:x.identifier,node:x.node_name,location:x.node_location},{status:200});
+  if(x.status==='FAILED')return NextResponse.json({error:`This test checkout already failed: ${x.failure_reason||'provisioning failed'}`,replayed:true,orderId:x.id},{status:409});
+  return NextResponse.json({ok:false,replayed:true,pending:true,orderId:x.id,status:x.status},{status:202});
+}
 
 export async function POST(req:NextRequest){
   const user=await getCurrentUser();
   if(!user)return NextResponse.json({error:'Sign in required'},{status:401});
   try{
     const b=await req.json();
+    const key=requestKey(req,b);
+    const replay=await replayPayment(user.id,key);if(replay)return replay;
     const planSlug=String(b.plan||'');
     const serverName=String(b.serverName||'My Game Server').trim().slice(0,120);
     const card=String(b.cardNumber||'').replace(/\D/g,'');
@@ -37,10 +51,19 @@ export async function POST(req:NextRequest){
 
     const amount=Number(plan.price_monthly);
     const metadata={testCard:`**** **** **** ${card.slice(-4)}`,gateway:'TEST',...config};
-    const oq=await db.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,paid_at,metadata) values($1,$2,'PAID',$3,$4,$5,$6,'test_card',now(),$7::jsonb) returning *`,[user.id,plan.id,amount,plan.currency,templateSlug,serverName,JSON.stringify(metadata)]);
-    const order=oq.rows[0];
-    const invoice=`INV-${Date.now().toString(36).toUpperCase()}-${String(order.id).slice(0,6).toUpperCase()}`;
-    await db.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,paid_at,description) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6)`,[user.id,order.id,invoice,amount,plan.currency,`${plan.name} - ${serverName}`]);
+    const c=await db.connect();let order:any;let invoice='';
+    try{
+      await c.query('begin');
+      const oq=await c.query(`insert into orders(user_id,plan_id,status,amount,currency,template_slug,server_name,payment_method,paid_at,metadata,idempotency_key) values($1,$2,'PAID',$3,$4,$5,$6,'test_card',now(),$7::jsonb,$8) returning *`,[user.id,plan.id,amount,plan.currency,templateSlug,serverName,JSON.stringify(metadata),key||null]);
+      order=oq.rows[0];
+      invoice=`INV-${Date.now().toString(36).toUpperCase()}-${String(order.id).slice(0,6).toUpperCase()}`;
+      await c.query(`insert into invoices(user_id,order_id,number,amount,currency,status,due_at,paid_at,description,kind) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6,'ORDER')`,[user.id,order.id,invoice,amount,plan.currency,`${plan.name} - ${serverName}`]);
+      await c.query('commit');
+    }catch(e:any){
+      await c.query('rollback').catch(()=>{});
+      if(e?.code==='23505'&&key){const existing=await replayPayment(user.id,key);if(existing)return existing;}
+      throw e;
+    }finally{c.release()}
 
     try{
       await db.query("update orders set status='PROVISIONING',updated_at=now() where id=$1",[order.id]);
@@ -56,16 +79,16 @@ export async function POST(req:NextRequest){
       return NextResponse.json({ok:true,orderId:order.id,identifier:server.identifier,node:server.node_name,location:server.node_location},{status:201});
     }catch(e:any){
       const msg=String(e?.message||e).slice(0,700);
-      const c=await db.connect();
+      const fail=await db.connect();
       try{
-        await c.query('begin');
-        await c.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);
-        await c.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[order.id]);
-        await c.query('commit');
+        await fail.query('begin');
+        await fail.query("update orders set status='FAILED',failure_reason=$2,updated_at=now() where id=$1",[order.id,msg]);
+        await fail.query("update invoices set status='REFUNDED' where order_id=$1 and status='PAID'",[order.id]);
+        await fail.query('commit');
       }catch{
-        await c.query('rollback').catch(()=>{});
+        await fail.query('rollback').catch(()=>{});
       }finally{
-        c.release();
+        fail.release();
       }
       return NextResponse.json({error:`Test payment succeeded, but provisioning failed and the sandbox invoice was marked refunded: ${msg}`,orderId:order.id},{status:502});
     }
