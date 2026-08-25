@@ -2,15 +2,16 @@
 import{useEffect,useRef,useState}from'react';
 import{RefreshCw,GitBranch,ShieldCheck,Server,ExternalLink,DownloadCloud,Loader2,Terminal,CheckCircle2,AlertTriangle,Activity,HardDrive,Database,Trash2,Clock3}from'lucide-react';
 
+type CleanupSummary={disk_used_before_bytes?:number|null;disk_used_after_bytes?:number|null;disk_reclaimed_bytes?:number|null;docker_reclaimable_before_bytes?:number|null;docker_reclaimable_after_bytes?:number|null;finished_at?:string|null};
 type UpdateInfo={installed?:string;latest?:string;name?:string;published_at?:string|null;update_available?:boolean;release_url?:string;channel?:string;message?:string;error?:string};
-type HistoryItem={job_id?:string|null;job_kind?:string|null;status?:string;started_at?:string|null;finished_at?:string|null;exit_code?:number|null};
-type AgentStatus={status?:'idle'|'running'|'success'|'failed'|'interrupted'|'unavailable'|string;job_id?:string|null;job_kind?:string|null;pid?:number|null;started_at?:string|null;finished_at?:string|null;exit_code?:number|null;agent_version?:string;log_tail?:string;history?:HistoryItem[];error?:string};
+type HistoryItem={job_id?:string|null;job_kind?:string|null;status?:string;started_at?:string|null;finished_at?:string|null;exit_code?:number|null;cleanup_summary?:CleanupSummary|null};
+type AgentStatus={status?:'idle'|'running'|'success'|'failed'|'interrupted'|'unavailable'|string;job_id?:string|null;job_kind?:string|null;pid?:number|null;started_at?:string|null;finished_at?:string|null;exit_code?:number|null;agent_version?:string;log_tail?:string;history?:HistoryItem[];cleanup_summary?:CleanupSummary|null;error?:string};
 type HostMetrics={
  ok?:boolean;agent_version?:string;cpu_percent?:number|null;
  memory?:{total_bytes?:number;used_bytes?:number;available_bytes?:number;percent?:number|null};
  disk?:{total_bytes?:number;used_bytes?:number;free_bytes?:number;percent?:number|null};
  backup_bytes?:number|null;load?:number[];uptime_seconds?:number|null;
- docker_df?:Array<Record<string,string>>;
+ docker_df?:Array<Record<string,string>>;docker_reclaimable_bytes?:number;docker_cleanup_recommended?:boolean;
  services?:Array<{name?:string;service?:string;status?:string}>;
  warnings?:string[];collected_at?:string;error?:string;
 };
@@ -56,7 +57,7 @@ export default function DeploymentCenter(){
  }
  async function safeCleanup(){
   if(agent?.status==='running')return;
-  if(!window.confirm('Run safe Docker cleanup now?\n\nThis removes only dangling images and build cache older than 7 days. It does NOT remove containers, volumes, databases or backups.'))return;
+  if(!window.confirm('Run safe Docker cleanup now?\n\nThis removes dangling images and trims unused build cache while retaining a reusable cache reserve for future builds. It does NOT remove containers, volumes, databases, customer data or backups.'))return;
   setCleaning(true);
   try{
    const r=await fetch('/api/admin/maintenance',{method:'POST',headers:{'x-crakhost-action':'safe-cleanup'}});const j=await r.json();setAgent(j);
@@ -65,7 +66,13 @@ export default function DeploymentCenter(){
   finally{setCleaning(false)}
  }
 
- useEffect(()=>{void check();void readAgent();void readHealth();const id=window.setInterval(()=>void readHealth(),15000);return()=>window.clearInterval(id)},[]);
+ useEffect(()=>{
+  void check();void readAgent();void readHealth();
+  const poll=()=>{if(!document.hidden)void readHealth()};
+  const id=window.setInterval(poll,30000);
+  document.addEventListener('visibilitychange',poll);
+  return()=>{window.clearInterval(id);document.removeEventListener('visibilitychange',poll)};
+ },[]);
  useEffect(()=>{if(agent?.status!=='running')return;const id=window.setInterval(()=>void readAgent(),2000);return()=>window.clearInterval(id)},[agent?.status]);
  useEffect(()=>{
   if(!agent?.job_id||!['success','failed','interrupted'].includes(String(agent.status)))return;
@@ -82,6 +89,8 @@ export default function DeploymentCenter(){
  const memPct=health?.memory?.percent;
  const dockerImages=health?.docker_df?.find(x=>String(x.Type||'').toLowerCase().includes('image'));
  const dockerBuild=health?.docker_df?.find(x=>String(x.Type||'').toLowerCase().includes('build'));
+ const retainedCache=!health?.docker_cleanup_recommended&&(health?.docker_reclaimable_bytes||0)>=4*1024**3;
+ const cleanupSummary=agent?.cleanup_summary;
 
  return <>
   <section className="opsHero">
@@ -99,9 +108,10 @@ export default function DeploymentCenter(){
   </section>
 
   <section className="card panelSection">
-   <div className="panelSectionHead"><div><h2>Server health & maintenance</h2><p>Read-only host metrics come from the restricted local updater agent. No browser shell is exposed.</p></div><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button className="btn" onClick={readHealth} disabled={healthLoading}><RefreshCw size={13}/>{healthLoading?'Refreshing':'Refresh health'}</button><button className="btn" onClick={safeCleanup} disabled={running||cleaning||agent?.status==='unavailable'}><Trash2 size={13}/>{maintenanceRunning?'Cleaning…':cleaning?'Starting…':'Safe cleanup'}</button></div></div>
+   <div className="panelSectionHead"><div><h2>Server health & maintenance</h2><p>Read-only host metrics come from the restricted local updater agent. No browser shell is exposed.</p></div><div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button className="btn" onClick={readHealth} disabled={healthLoading}><RefreshCw size={13}/>{healthLoading?'Refreshing':'Refresh health'}</button><button className="btn" onClick={safeCleanup} disabled={running||cleaning||agent?.status==='unavailable'} title={health?.docker_cleanup_recommended?'Docker storage pressure indicates cleanup is useful.':'Cleanup remains available manually; no urgent storage pressure is detected.'}><Trash2 size={13}/>{maintenanceRunning?'Cleaning…':cleaning?'Starting…':health?.docker_cleanup_recommended?'Safe cleanup recommended':'Safe cleanup'}</button></div></div>
    {health?.error&&<div className="notice error">{health.error}</div>}
    {health?.warnings?.map((w,i)=><div key={i} className="notice error" style={{marginBottom:8}}><AlertTriangle size={14}/>{w}</div>)}
+   {retainedCache&&<div className="notice" style={{marginBottom:8}}><HardDrive size={14}/><span>Docker still has {humanBytes(health?.docker_reclaimable_bytes)} reclaimable, but disk pressure is low. This is treated as reusable build cache, not an urgent warning.</span></div>}
    <div className="deployGrid" style={{marginTop:12}}>
     <Card label="CPU usage" value={health?.cpu_percent==null?'—':`${health.cpu_percent}%`} icon={<Activity size={14}/>}/>
     <Card label="Memory usage" value={memPct==null?'—':`${memPct}%`} icon={<Server size={14}/>}/>
@@ -111,12 +121,13 @@ export default function DeploymentCenter(){
     <div className="timelineRow"><span><b>Disk free</b><small>{health?.disk?`${humanBytes(health.disk.used_bytes)} used of ${humanBytes(health.disk.total_bytes)}`:'Waiting for host metrics'}</small></span><b>{humanBytes(health?.disk?.free_bytes)}</b></div>
     <div className="timelineRow"><span><b>Backup storage</b><small>CrakHost updater/database backups</small></span><b>{humanBytes(health?.backup_bytes)}</b></div>
     <div className="timelineRow"><span><b>Docker reclaimable</b><small>{dockerImages?`Images ${dockerImages.Size||'—'} total`: 'Docker image storage'} · {dockerBuild?`Build cache ${dockerBuild.Size||'—'}`:'build cache'}</small></span><b>{[dockerImages?.Reclaimable,dockerBuild?.Reclaimable].filter(Boolean).join(' + ')||'—'}</b></div>
+    {cleanupSummary&&<div className="timelineRow"><span><b>Last cleanup result</b><small>{cleanupSummary.finished_at?`Finished ${new Date(cleanupSummary.finished_at).toLocaleString()}`:'Latest successful maintenance cleanup'}</small></span><b>{humanBytes(cleanupSummary.disk_reclaimed_bytes)} freed</b></div>}
     <div className="timelineRow"><span><b>Load / uptime</b><small>{health?.load?.length?`Load ${health.load.join(' / ')}`:'Load unavailable'}</small></span><b>{humanDuration(health?.uptime_seconds)}</b></div>
    </div>
    <div style={{marginTop:16}}><div className="panelSectionHead"><div><h3 style={{margin:0}}>CrakHost services</h3><p>Compose services including panel, node, database and mail stack.</p></div><small>{health?.collected_at?`Updated ${new Date(health.collected_at).toLocaleTimeString()}`:''}</small></div>
     <div className="releaseBox">{health?.services?.length?health.services.map(s=><div className="timelineRow" key={`${s.service}-${s.name}`}><span><b>{s.service||s.name}</b><small>{s.name}</small></span><b style={{color:serviceHealthy(s.status)?'#86efac':'#fca5a5'}}>{s.status||'Unknown'}</b></div>):<div className="timelineRow"><span><b>Services</b><small>No Compose service data returned yet.</small></span><b>—</b></div>}</div>
    </div>
-   <div className="notice" style={{marginTop:14}}><Trash2 size={14}/><span><b>Safe cleanup policy:</b> only dangling Docker images and build cache older than 7 days are removed. Containers, volumes, databases, customer data and backups are left untouched.</span></div>
+   <div className="notice" style={{marginTop:14}}><Trash2 size={14}/><span><b>Safe cleanup policy:</b> dangling Docker images are removed and unused build cache is trimmed while a reusable cache reserve is retained. Containers, volumes, databases, customer data and backups are left untouched.</span></div>
   </section>
 
   <section className="card panelSection">
@@ -133,7 +144,7 @@ export default function DeploymentCenter(){
 
   <section className="card panelSection">
    <div className="panelSectionHead"><div><h2>Recent deployment & maintenance history</h2><p>Last completed privileged jobs persisted by the host agent.</p></div><Clock3 size={16}/></div>
-   <div className="releaseBox">{agent?.history?.length?agent.history.slice(0,8).map(h=><div className="timelineRow" key={h.job_id||`${h.started_at}-${h.job_kind}`}><span><b>{h.job_kind==='maintenance'?'Maintenance cleanup':'Production update'}</b><small>{h.started_at?new Date(h.started_at).toLocaleString():'Unknown start'}{h.finished_at?` → ${new Date(h.finished_at).toLocaleString()}`:''}</small></span><b style={{color:h.status==='success'?'#86efac':h.status==='failed'?'#fca5a5':'inherit'}}>{h.status||'unknown'}{h.exit_code==null?'':` · ${h.exit_code}`}</b></div>):<div className="timelineRow"><span><b>History</b><small>History starts with v0.53 jobs.</small></span><b>Empty</b></div>}</div>
+   <div className="releaseBox">{agent?.history?.length?agent.history.slice(0,8).map(h=><div className="timelineRow" key={h.job_id||`${h.started_at}-${h.job_kind}`}><span><b>{h.job_kind==='maintenance'?'Maintenance cleanup':'Production update'}</b><small>{h.started_at?new Date(h.started_at).toLocaleString():'Unknown start'}{h.finished_at?` → ${new Date(h.finished_at).toLocaleString()}`:''}{h.cleanup_summary?.disk_reclaimed_bytes?` · freed ${humanBytes(h.cleanup_summary.disk_reclaimed_bytes)}`:''}</small></span><b style={{color:h.status==='success'?'#86efac':h.status==='failed'?'#fca5a5':'inherit'}}>{h.status||'unknown'}{h.exit_code==null?'':` · ${h.exit_code}`}</b></div>):<div className="timelineRow"><span><b>History</b><small>History starts with v0.53 jobs.</small></span><b>Empty</b></div>}</div>
   </section>
 
   <section className="deployGrid panelSection"><div className="deployCard"><span>One-click production update</span><strong>Backup + migrate + verify</strong><p className="small">Updates create a PostgreSQL backup first, refresh main, rebuild the panel, restart CrakNode and verify service health.</p></div><div className="deployCard"><span>Manual fallback</span><strong>Safe updater</strong><p className="small">SSH remains available as a recovery path if the panel or updater agent cannot be reached.</p><code className="codeBlock">cd /opt/crakhost &amp;&amp; sudo ./scripts/update-production.sh</code></div><div className="deployCard"><span>Security boundary</span><strong>No browser shell</strong><p className="small">The panel talks to a root-owned Unix socket using a server-side secret. Only health, update and safe cleanup actions exist.</p></div></section>
