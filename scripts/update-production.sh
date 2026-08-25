@@ -6,7 +6,6 @@ DIR="${CRAKHOST_DIR:-/opt/crakhost}"
 cd "$DIR"
 [ -f .env ] || { echo "[CrakHost] Missing $DIR/.env" >&2; exit 1; }
 
-COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.production.yml)
 OLD_SHA="$(git rev-parse HEAD)"
 BACKUP_ROOT="${CRAKHOST_BACKUP_ROOT:-/var/backups/crakhost}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -14,20 +13,58 @@ BACKUP_DIR="$BACKUP_ROOT/$STAMP"
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "[CrakHost] Tracked source files have local changes. Commit/stash them before updating." >&2
+  git status --short >&2 || true
   exit 1
 fi
 
 mkdir -p "$BACKUP_DIR"
 cp .env "$BACKUP_DIR/.env"
 chmod 600 "$BACKUP_DIR/.env"
+printf '%s\n' "$OLD_SHA" > "$BACKUP_DIR/source-sha.txt"
+
+get_env(){ sed -n "s/^$1=//p" .env | tail -n 1; }
+set_env(){
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp)"
+  awk -v k="$key" -v v="$value" 'BEGIN{done=0} index($0,k"=")==1 {print k"="v;done=1;next} {print} END{if(!done)print k"="v}' .env > "$tmp"
+  mv "$tmp" .env
+  chmod 600 .env
+}
+ensure_secret(){
+  local key="$1" current
+  current="$(get_env "$key")"
+  if [ -z "$current" ] || [[ "$current" == replace-with-* ]] || [[ "$current" == change-me-* ]]; then
+    set_env "$key" "$(openssl rand -hex 32)"
+    echo "[CrakHost] Generated missing $key for this existing installation."
+  fi
+}
+ensure_value(){
+  local key="$1" fallback="$2" current
+  current="$(get_env "$key")"
+  [ -n "$current" ] || set_env "$key" "$fallback"
+}
+
+# v0.50+ added maintenance/registration settings that older VPS installs may not have.
+# Bootstrap them before the production Compose overlay is parsed.
+ensure_secret CRAKHOST_CRON_SECRET
+ensure_secret CRAKNODE_REGISTRATION_TOKEN
+ensure_value CRAKHOST_PENDING_ORDER_TTL_HOURS 24
+ensure_value CRAKHOST_COMMERCE_CLEANUP_SECONDS 3600
+if [ -z "$(get_env APP_URL)" ]; then
+  PANEL_DOMAIN_VALUE="$(get_env PANEL_DOMAIN)"
+  [ -n "$PANEL_DOMAIN_VALUE" ] && set_env APP_URL "https://${PANEL_DOMAIN_VALUE}"
+fi
+
+COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.production.yml)
 
 echo "[CrakHost] Creating PostgreSQL backup..."
 if ! "${COMPOSE[@]}" exec -T postgres pg_dump -U crakhost -d crakhost | gzip -9 > "$BACKUP_DIR/crakhost.sql.gz"; then
   echo "[CrakHost] Database backup failed; update cancelled." >&2
   rm -f "$BACKUP_DIR/crakhost.sql.gz"
+  cp "$BACKUP_DIR/.env" .env
+  chmod 600 .env
   exit 1
 fi
-printf '%s\n' "$OLD_SHA" > "$BACKUP_DIR/source-sha.txt"
 
 echo "[CrakHost] Backup ready: $BACKUP_DIR"
 git fetch --prune origin main
@@ -94,8 +131,10 @@ if [ "$NODE_OK" -ne 1 ]; then
   exit 1
 fi
 
-nginx -t >/dev/null
-systemctl reload nginx
+if command -v nginx >/dev/null 2>&1; then
+  nginx -t >/dev/null
+  systemctl reload nginx
+fi
 
 echo "[CrakHost] Update verified successfully."
 echo "[CrakHost] Backup: $BACKUP_DIR"
