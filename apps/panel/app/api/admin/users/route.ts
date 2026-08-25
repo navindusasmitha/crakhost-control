@@ -34,7 +34,9 @@ export async function DELETE(req:NextRequest){
  const {id}=await req.json();if(!id)return NextResponse.json({error:'User id is required'},{status:400});if(id===actor.id)return NextResponse.json({error:'You cannot delete your own admin account.'},{status:400});
  const active=await db.query(`select count(*)::int n from servers where owner_id=$1 and status<>'deleted'`,[id]);if(Number(active.rows[0]?.n||0)>0)return NextResponse.json({error:'User still owns active services. Transfer or delete those services first.'},{status:409});
  const user=await db.query('select id,email from users where id=$1',[id]);if(!user.rows[0])return NextResponse.json({error:'User not found'},{status:404});
- await db.query('delete from users where id=$1',[id]);
- await db.query(`insert into audit_events(user_id,event,subject_type,subject_id,metadata) values($1,'admin.user.delete','user',$2,$3::jsonb)`,[actor.id,id,JSON.stringify({email:user.rows[0].email})]);
+ const tombstone=`deleted-${id}@invalid.crakhost.local`;
+ await db.query(`update users set account_status='DELETED',name='Deleted User',email=$2,banned_at=now(),ban_reason='Account deleted by administrator',credits=0 where id=$1`,[id,tombstone]);
+ await db.query('delete from sessions where user_id=$1',[id]);
+ await db.query(`insert into audit_events(user_id,event,subject_type,subject_id,metadata) values($1,'admin.user.delete','user',$2,$3::jsonb)`,[actor.id,id,JSON.stringify({previousEmail:user.rows[0].email})]);
  return NextResponse.json({ok:true})
 }
