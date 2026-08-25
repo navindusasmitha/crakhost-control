@@ -11,7 +11,7 @@ async function tick(){const now=new Date();const {rows}=await db.query(`select s
 async function billingTick(){
   const {rows}=await db.query(`select s.id from servers s where s.next_due_at is not null and s.next_due_at<=now() and s.billing_status in ('ACTIVE','SUSPENDED') order by s.next_due_at limit 50`);
   for(const candidate of rows){
-    let runtime=null,action='',notify='',notifyKind='info',price=0,currency='',serviceName='';
+    let runtime=null,action='',notify='',notifyKind='info';
     try{
       const c=await db.connect();
       try{
@@ -22,7 +22,7 @@ async function billingTick(){
           where s.id=$1 for update of s`,[candidate.id]);
         const s=sq.rows[0];
         if(!s||!s.next_due_at||new Date(s.next_due_at)>new Date()||!['ACTIVE','SUSPENDED'].includes(s.billing_status)){await c.query('commit');continue}
-        runtime=s;price=Number(s.price_monthly);currency=s.currency;serviceName=s.name;
+        runtime=s;const price=Number(s.price_monthly);
         const uq=await c.query('select credits from users where id=$1 for update',[s.owner_id]);
         const credits=Number(uq.rows[0]?.credits||0);
         const iq=await c.query(`select id,number from invoices where server_id=$1 and kind='RENEWAL' and status='DUE' order by created_at desc limit 1 for update`,[s.id]);
@@ -34,20 +34,20 @@ async function billingTick(){
           const next=await c.query(`update servers set next_due_at=greatest(next_due_at,now())+interval '30 days',billing_status='ACTIVE',suspended=false,suspended_at=null,updated_at=now() where id=$1 returning next_due_at`,[s.id]);
           const nextDue=next.rows[0].next_due_at;
           if(dueInvoice){
-            await c.query(`update invoices set amount=$2,currency=$3,status='PAID',paid_at=now(),period_start=coalesce(period_start,$4),period_end=$5,description=$6 where id=$1`,[dueInvoice.id,price,s.currency,s.next_due_at,nextDue,`${s.plan_name} renewal - ${s.name}`]);
+            await c.query(`update invoices set amount=$2,currency=$3,status='PAID',paid_at=now(),period_start=coalesce(period_start,$4::timestamptz),period_end=$5::timestamptz,description=$6 where id=$1`,[dueInvoice.id,price,s.currency,s.next_due_at,nextDue,`${s.plan_name} renewal - ${s.name}`]);
           }else{
             const num=`INV-${Date.now().toString(36).toUpperCase()}-${s.id.slice(0,6).toUpperCase()}`;
-            await c.query(`insert into invoices(user_id,server_id,number,amount,currency,status,due_at,paid_at,description,kind,period_start,period_end) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6,'RENEWAL',$7,$8)`,[s.owner_id,s.id,num,price,s.currency,`${s.plan_name} renewal - ${s.name}`,s.next_due_at,nextDue]);
+            await c.query(`insert into invoices(user_id,server_id,number,amount,currency,status,due_at,paid_at,description,kind,period_start,period_end) values($1,$2,$3,$4,$5,'PAID',now(),now(),$6,'RENEWAL',$7::timestamptz,$8::timestamptz)`,[s.owner_id,s.id,num,price,s.currency,`${s.plan_name} renewal - ${s.name}`,s.next_due_at,nextDue]);
           }
           await c.query("insert into service_events(server_id,type,detail) values($1,'billing.renewed',$2)",[s.id,`${s.currency} ${price} charged; next due ${new Date(nextDue).toISOString()}`]);
           await c.query('commit');
           action=s.suspended?'start':'';notify=`${s.name} renewed for ${s.currency} ${price}`;notifyKind='success';
         }else{
           if(dueInvoice){
-            await c.query(`update invoices set amount=$2,currency=$3,due_at=coalesce(due_at,now()),period_start=coalesce(period_start,$4),period_end=coalesce(period_end,$4+interval '30 days'),description=$5 where id=$1`,[dueInvoice.id,price,s.currency,s.next_due_at,`${s.plan_name} renewal - ${s.name}`]);
+            await c.query(`update invoices set amount=$2,currency=$3,due_at=coalesce(due_at,now()),period_start=coalesce(period_start,$4::timestamptz),period_end=coalesce(period_end,$4::timestamptz+interval '30 days'),description=$5 where id=$1`,[dueInvoice.id,price,s.currency,s.next_due_at,`${s.plan_name} renewal - ${s.name}`]);
           }else{
             const num=`INV-${Date.now().toString(36).toUpperCase()}-${s.id.slice(0,6).toUpperCase()}`;
-            await c.query(`insert into invoices(user_id,server_id,number,amount,currency,status,due_at,description,kind,period_start,period_end) values($1,$2,$3,$4,$5,'DUE',now(),$6,'RENEWAL',$7,$7+interval '30 days')`,[s.owner_id,s.id,num,price,s.currency,`${s.plan_name} renewal - ${s.name}`,s.next_due_at]);
+            await c.query(`insert into invoices(user_id,server_id,number,amount,currency,status,due_at,description,kind,period_start,period_end) values($1,$2,$3,$4,$5,'DUE',now(),$6,'RENEWAL',$7::timestamptz,$7::timestamptz+interval '30 days')`,[s.owner_id,s.id,num,price,s.currency,`${s.plan_name} renewal - ${s.name}`,s.next_due_at]);
           }
           const wasSuspended=!!s.suspended;
           await c.query(`update servers set suspended=true,suspended_at=coalesce(suspended_at,now()),billing_status='SUSPENDED',updated_at=now() where id=$1`,[s.id]);
