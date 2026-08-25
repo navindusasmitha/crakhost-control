@@ -1,3 +1,4 @@
+import {timingSafeEqual} from 'node:crypto';
 import {NextRequest,NextResponse} from 'next/server';
 import {getCurrentUser} from '@/lib/auth';
 import {db} from '@/lib/db';
@@ -9,6 +10,8 @@ import {withOrderProvisionLock} from '@/lib/order-provision-lock';
 
 function appBase(){const raw=process.env.APP_URL||process.env.PANEL_URL||(process.env.PANEL_DOMAIN?`https://${process.env.PANEL_DOMAIN}`:'');return raw.replace(/\/$/,'')}
 function validPort(v:any){const n=Number(v);return Number.isInteger(n)&&n>=1&&n<=65535?n:null}
+function internalSecretOk(req:NextRequest){const expected=String(process.env.CRAKHOST_CRON_SECRET||''),got=String(req.headers.get('x-crakhost-cron-secret')||'');if(expected.length<16)return false;const a=Buffer.from(expected),b=Buffer.from(got);return a.length===b.length&&timingSafeEqual(a,b)}
+async function requestUser(req:NextRequest,id:string){const current=await getCurrentUser();if(current)return current;if(!internalSecretOk(req))return null;const {rows}=await db.query('select u.* from users u join orders o on o.user_id=u.id where o.id=$1 limit 1',[id]);return rows[0]||null}
 function configFrom(order:any){
   const m=order.metadata&&typeof order.metadata==='object'?order.metadata:{};
   const game=String(m.game||'game').slice(0,30),software=String(m.software||'default').slice(0,80),location=String(m.location||'auto').slice(0,100);
@@ -27,9 +30,9 @@ async function orderRow(id:string,userId:string){
 }
 function activeResponse(o:any,recovered=false){return NextResponse.json({ok:true,recovered,orderId:o.id,identifier:o.identifier,node:o.node_name,location:o.node_location,status:'ACTIVE'},{status:200})}
 
-export async function POST(_req:NextRequest,{params}:{params:Promise<{id:string}>}){
-  const user=await getCurrentUser();if(!user)return NextResponse.json({error:'Sign in required'},{status:401});
+export async function POST(req:NextRequest,{params}:{params:Promise<{id:string}>}){
   const {id}=await params;if(!id)return NextResponse.json({error:'Order id is required.'},{status:400});
+  const user=await requestUser(req,id);if(!user)return NextResponse.json({error:'Sign in required'},{status:401});
   const first=await orderRow(id,user.id);if(!first)return NextResponse.json({error:'Order not found.'},{status:404});
   if(first.status==='ACTIVE'&&first.identifier)return activeResponse(first);
   if(first.status==='PENDING')return NextResponse.json({error:'This order has not been confirmed as paid yet.',code:'ORDER_UNPAID'},{status:409});
