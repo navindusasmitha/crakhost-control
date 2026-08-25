@@ -8,7 +8,7 @@ import {updaterAgentRequest} from '@/lib/updater-agent';
 export const dynamic='force-dynamic';
 export const runtime='nodejs';
 
-const VERSION='0.56.0';
+const VERSION='0.57.1';
 
 export async function GET(){
   const user=await getCurrentUser();
