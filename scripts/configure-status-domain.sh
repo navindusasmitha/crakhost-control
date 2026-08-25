@@ -68,14 +68,16 @@ systemctl reload nginx
 
 echo "[CrakHost] Isolated public status HTTP proxy ready for $DOMAIN."
 if [ "$AUTO_TLS" = "true" ] && command -v certbot >/dev/null 2>&1 && [ -n "$EMAIL" ]; then
-  if certbot certificates 2>/dev/null | grep -Fq "Domains: $DOMAIN"; then
-    echo "[CrakHost] HTTPS certificate for $DOMAIN already exists."
-  elif getent ahostsv4 "$DOMAIN" >/dev/null 2>&1; then
-    echo "[CrakHost] Requesting HTTPS certificate for $DOMAIN..."
-    if timeout 120 certbot --nginx --non-interactive --agree-tos --redirect -m "$EMAIL" -d "$DOMAIN" --cert-name crakhost-status; then
+  if getent ahostsv4 "$DOMAIN" >/dev/null 2>&1; then
+    # Always ask Certbot to deploy the certificate into the freshly generated
+    # status vhost. Previously we skipped this step when a certificate already
+    # existed, which could leave HTTPS on the panel/default vhost after an
+    # nginx config refresh. --keep-until-expiring avoids unnecessary renewal.
+    echo "[CrakHost] Installing/refreshing HTTPS configuration for $DOMAIN..."
+    if timeout 120 certbot --nginx --non-interactive --agree-tos --redirect --keep-until-expiring -m "$EMAIL" -d "$DOMAIN" --cert-name crakhost-status; then
       echo "[CrakHost] HTTPS ready for https://$DOMAIN"
     else
-      echo "[CrakHost] HTTPS request did not complete. DNS may still be propagating; HTTP proxy remains configured." >&2
+      echo "[CrakHost] HTTPS deployment did not complete. DNS/certificate state may still be propagating; HTTP proxy remains configured." >&2
     fi
   else
     echo "[CrakHost] DNS for $DOMAIN is not resolving yet. Add the A record, then re-apply the latest release to request HTTPS." >&2
