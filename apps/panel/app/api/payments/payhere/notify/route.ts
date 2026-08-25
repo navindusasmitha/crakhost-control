@@ -8,6 +8,11 @@ import {money,notificationHash,payhereConfig,safeSignatureEqual} from '@/lib/pay
 
 function value(form:FormData,key:string){return String(form.get(key)||'').trim()}
 function baseUrl(){return String(process.env.APP_URL||process.env.PANEL_URL||(process.env.PANEL_DOMAIN?`https://${process.env.PANEL_DOMAIN}`:'')).trim().replace(/\/$/,'')}
+function queueProvision(orderId:string){
+  const secret=String(process.env.CRAKHOST_CRON_SECRET||'');if(secret.length<16)return;
+  const base=String(process.env.PANEL_INTERNAL_URL||'http://127.0.0.1:4310').replace(/\/$/,'');
+  setTimeout(()=>{void fetch(`${base}/api/billing/orders/${encodeURIComponent(orderId)}/resume`,{method:'POST',headers:{'x-crakhost-cron-secret':secret}}).then(async r=>{if(!r.ok&&r.status!==202&&r.status!==409)console.error('[payhere] automatic provisioning returned',r.status,await r.text())}).catch(e=>console.error('[payhere] automatic provisioning request failed',e))},0);
+}
 
 export async function POST(req:NextRequest){
   let cfg;try{cfg=payhereConfig()}catch{return new NextResponse('PayHere unavailable',{status:503})}
@@ -36,7 +41,7 @@ export async function POST(req:NextRequest){
       if(current==='PENDING'){
         await c.query("update orders set status='PAID',paid_at=coalesce(paid_at,now()),updated_at=now() where id=$1",[orderId]);
         await c.query("update invoices set status='PAID',paid_at=coalesce(paid_at,now()) where order_id=$1 and status in ('DUE','VOID')",[orderId]);
-        await c.query("insert into notifications(user_id,title,body,kind) values($1,'PayHere payment confirmed',$2,'success')",[order.user_id,`${order.plan_name||'Hosting'} payment is confirmed. Provisioning will resume automatically when you return to Billing.`]).catch(()=>{});
+        await c.query("insert into notifications(user_id,title,body,kind) values($1,'PayHere payment confirmed',$2,'success')",[order.user_id,`${order.plan_name||'Hosting'} payment is confirmed. Automatic provisioning has been queued.`]).catch(()=>{});
         paidNow=true;
       }else if(current==='CANCELLED'){
         await c.query("update invoices set status='PAID',paid_at=coalesce(paid_at,now()) where order_id=$1 and status in ('DUE','VOID')",[orderId]);
@@ -65,6 +70,7 @@ export async function POST(req:NextRequest){
     await emitWebhookEvent(order.user_id,'invoice.paid',{invoice_number:order.invoice_number,order_id:orderId,amount:Number(order.amount),currency,payment_method:'payhere',payment_id:paymentId}).catch(()=>null);
     const base=baseUrl();
     await sendTemplateEmail('invoice_paid',order.customer_email,{name:order.customer_name,invoice_number:order.invoice_number||'',currency,amount:money(amount),billing_url:base?`${base}/billing?payhere=${encodeURIComponent(orderId)}`:''}).catch(e=>console.warn('[mail] payhere receipt delivery failed',e?.message||e));
+    queueProvision(orderId);
   }
   if(latePaid)await emitWebhookEvent(order.user_id,'payment.review_required',{order_id:orderId,payment_id:paymentId,reason:'late_success_after_cancel'}).catch(()=>null);
   if(chargeback){
