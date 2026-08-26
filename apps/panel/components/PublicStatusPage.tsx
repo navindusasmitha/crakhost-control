@@ -45,6 +45,7 @@ export default function PublicStatusPage(){
   const title=String(data?.title||'CrakHost Status');
   const logo=String(data?.logoUrl||'');
   const global=globalState(overall);
+  const collectorErrors=Array.isArray(data?.collector?.errors)?data.collector.errors:[];
 
   return <main className={styles.shell}>
     <section className={styles.wrapper}>
@@ -67,6 +68,8 @@ export default function PublicStatusPage(){
 
       {incidents.length>0?<div className={styles.incidentStrip}>
         <strong>{incidents[0].title}</strong><span>{incidents[0].message}</span><em>{String(incidents[0].status||'investigating').toUpperCase()}</em>
+      </div>:collectorErrors.length?<div className={styles.incidentStrip}>
+        <strong>STATUS COLLECTOR</strong><span>Minute history could not be saved. Check panel logs for the exact database error.</span><em>DEGRADED</em>
       </div>:null}
 
       <div className={styles.dashboardGrid}>
@@ -75,7 +78,7 @@ export default function PublicStatusPage(){
 
       <footer className={styles.footer}>
         <span>© 2026 CRAKHOST INFRASTRUCTURE · LAST 10 MINUTES SAVED</span>
-        <span className={styles.footerCenter}>LAST UPDATE: {formatTime(data?.generatedAt)}</span>
+        <span className={styles.footerCenter}>LAST SAVED: {data?.lastSavedAt?formatTime(data.lastSavedAt):'WAITING FOR FIRST SAMPLE'}</span>
         <span className={styles.scanning}>{busy?'SYNCING TELEMETRY…':'SCANNING GLOBAL NODES…'}</span>
       </footer>
     </section>
