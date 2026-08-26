@@ -1,14 +1,21 @@
 import {NextResponse} from 'next/server';
-import {buildPublicStatus} from '@/lib/status-page';
+import {buildPublicStatus,recordPublicStatusSample} from '@/lib/status-page';
 
 export const dynamic='force-dynamic';
 export const runtime='nodejs';
 
 export async function GET(){
   try{
+    let collector:any=null;
+    try{
+      collector=await recordPublicStatusSample(false);
+      if(collector&&!collector.ok)console.error('[CrakHost Status] public refresh sample reported errors:',collector.errors||[]);
+    }catch(error){
+      console.error('[CrakHost Status] public refresh sample failed:',error);
+    }
     const data=await buildPublicStatus();
     if(!data.enabled)return NextResponse.json({error:'Status page disabled'},{status:404,headers:{'cache-control':'no-store'}});
-    return NextResponse.json(data,{headers:{'cache-control':'no-store, max-age=0','access-control-allow-origin':'*'}});
+    return NextResponse.json({...data,collector},{headers:{'cache-control':'no-store, max-age=0','access-control-allow-origin':'*'}});
   }catch(error){
     console.error('[CrakHost Status] public status build failed:',error);
     const now=new Date().toISOString();
