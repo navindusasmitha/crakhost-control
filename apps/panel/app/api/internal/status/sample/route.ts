@@ -13,7 +13,8 @@ function authorized(req:Request){
 export async function POST(req:Request){
   if(!authorized(req))return NextResponse.json({error:'Unauthorized'},{status:401});
   try{
-    const result=await recordPublicStatusSample();
+    const probeNodes=new URL(req.url).searchParams.get('probe')==='1';
+    const result=await recordPublicStatusSample(probeNodes);
     return NextResponse.json(result,{headers:{'cache-control':'no-store'}});
   }catch(error){
     console.error('[CrakHost Status] scheduled sample failed:',error);
