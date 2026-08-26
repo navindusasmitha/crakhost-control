@@ -142,10 +142,11 @@ export async function recordPublicStatusSample(probeNodes=true){
   const errors:string[]=[];
   for(const component of current.components){
     try{
-      const result=await db.query(`insert into status_component_snapshots(component_id,status,detail,created_at)
-        select $1,$2,$3,now()
-        where not exists(select 1 from status_component_snapshots where component_id=$1 and created_at>now()-interval '50 seconds')
-        returning id`,[component.id,component.status,component.detail.slice(0,255)]);
+      const result=await db.query(`insert into status_component_snapshots(component_id,bucket_at,status,detail,created_at)
+        values($1,date_trunc('minute',now()),$2,$3,now())
+        on conflict(component_id,bucket_at) do update
+          set status=excluded.status,detail=excluded.detail,created_at=excluded.created_at
+        returning bucket_at`,[component.id,component.status,component.detail.slice(0,255)]);
       if(result.rows?.length)sampled+=1;
     }catch(error){
       const message=`${component.id}: ${errorText(error)}`;
@@ -153,7 +154,7 @@ export async function recordPublicStatusSample(probeNodes=true){
       console.error('[CrakHost Status] sample insert failed:',message);
     }
   }
-  try{await db.query(`delete from status_component_snapshots where created_at<now()-interval '10 minutes'`)}
+  try{await db.query(`delete from status_component_snapshots where bucket_at<date_trunc('minute',now())-interval '9 minutes'`)}
   catch(error){const message=`cleanup: ${errorText(error)}`;errors.push(message);console.error('[CrakHost Status] sample cleanup failed:',message)}
   await db.query(`delete from node_health_snapshots where created_at<now()-interval '45 days'`).catch(()=>null);
   return {ok:errors.length===0,sampled,nodeProbe,errors,generatedAt:new Date().toISOString(),sampleEverySeconds:SAMPLE_SECONDS,retainedMinutes:HISTORY_MINUTES};
@@ -164,13 +165,13 @@ export async function buildPublicStatus(){
   const [current,historyQ]=await Promise.all([
     evaluateCurrent(config),
     safeRows(`select component_id,
-      date_trunc('minute',created_at) bucket,
-      count(*) filter(where status<>'maintenance')::int samples,
-      count(*) filter(where status='operational')::int online,
-      min(created_at) first_seen,max(created_at) last_seen
+      bucket_at bucket,
+      1::int samples,
+      case when status='operational' then 1 else 0 end::int online,
+      created_at first_seen,created_at last_seen
       from status_component_snapshots
-      where created_at>=now()-interval '10 minutes'
-      group by component_id,2 order by 2`)
+      where bucket_at>=date_trunc('minute',now())-interval '9 minutes'
+      order by bucket_at`)
   ]);
   const history=historyQ.rows||[];
   const historyHealthy=!historyQ.error;
@@ -204,6 +205,6 @@ export async function buildPublicStatus(){
   return {
     enabled:config.enabled,domain:config.domain,title:config.title,description:config.description,logoUrl:config.logoUrl,
     refreshSeconds:SAMPLE_SECONDS,historyMinutes:HISTORY_MINUTES,overall,components,incidents:incidents.slice(0,20),activeIncidents,
-    generatedAt:new Date().toISOString(),lastSavedAt:lastSavedAt?new Date(lastSavedAt).toISOString():null,monitoringSince:'v0.58.7',telemetry:{...current.telemetry,history:historyHealthy,historyError:historyQ.error}
+    generatedAt:new Date().toISOString(),lastSavedAt:lastSavedAt?new Date(lastSavedAt).toISOString():null,monitoringSince:'v0.58.9',telemetry:{...current.telemetry,history:historyHealthy,historyError:historyQ.error}
   };
 }
