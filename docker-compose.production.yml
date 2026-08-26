@@ -75,6 +75,12 @@ services:
       - |
         sleep 20
         while true; do
+          echo "[CrakHost Ops] reconciling provisioning state..."
+          if reconcile=$$(wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/operations/reconcile 2>&1); then
+            echo "[CrakHost Ops] $$reconcile"
+          else
+            echo "[CrakHost Ops] reconciliation request failed: $$reconcile" >&2
+          fi
           echo "[CrakHost Status] collecting minute sample..."
           if result=$$(wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" "http://panel:4310/api/internal/status/sample?probe=1" 2>&1); then
             echo "[CrakHost Status] $$result"
