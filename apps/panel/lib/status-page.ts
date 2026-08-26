@@ -136,19 +136,27 @@ async function refreshNodeTelemetry(){
 export async function recordPublicStatusSample(probeNodes=true){
   const nodeProbe=probeNodes?await refreshNodeTelemetry():{checked:0,online:0,error:null};
   const config=await getStatusConfig();
-  if(!config.enabled)return {ok:true,disabled:true,sampled:0,nodeProbe};
+  if(!config.enabled)return {ok:true,disabled:true,sampled:0,nodeProbe,errors:[] as string[]};
   const current=await evaluateCurrent(config);
   let sampled=0;
+  const errors:string[]=[];
   for(const component of current.components){
-    const result=await db.query(`insert into status_component_snapshots(component_id,status,detail,created_at)
-      select $1,$2,$3,now()
-      where not exists(select 1 from status_component_snapshots where component_id=$1 and created_at>now()-interval '50 seconds')
-      returning id`,[component.id,component.status,component.detail.slice(0,255)]).catch(()=>({rows:[]} as any));
-    if(result.rows?.length)sampled+=1;
+    try{
+      const result=await db.query(`insert into status_component_snapshots(component_id,status,detail,created_at)
+        select $1,$2,$3,now()
+        where not exists(select 1 from status_component_snapshots where component_id=$1 and created_at>now()-interval '50 seconds')
+        returning id`,[component.id,component.status,component.detail.slice(0,255)]);
+      if(result.rows?.length)sampled+=1;
+    }catch(error){
+      const message=`${component.id}: ${errorText(error)}`;
+      errors.push(message);
+      console.error('[CrakHost Status] sample insert failed:',message);
+    }
   }
-  await db.query(`delete from status_component_snapshots where created_at<now()-interval '10 minutes'`).catch(()=>null);
+  try{await db.query(`delete from status_component_snapshots where created_at<now()-interval '10 minutes'`)}
+  catch(error){const message=`cleanup: ${errorText(error)}`;errors.push(message);console.error('[CrakHost Status] sample cleanup failed:',message)}
   await db.query(`delete from node_health_snapshots where created_at<now()-interval '45 days'`).catch(()=>null);
-  return {ok:true,sampled,nodeProbe,generatedAt:new Date().toISOString(),sampleEverySeconds:SAMPLE_SECONDS,retainedMinutes:HISTORY_MINUTES};
+  return {ok:errors.length===0,sampled,nodeProbe,errors,generatedAt:new Date().toISOString(),sampleEverySeconds:SAMPLE_SECONDS,retainedMinutes:HISTORY_MINUTES};
 }
 
 export async function buildPublicStatus(){
@@ -192,9 +200,10 @@ export async function buildPublicStatus(){
   let overall=worst(components.map(c=>c.status));
   if(activeIncidents.some(i=>i.severity==='major'))overall='outage';else if(activeIncidents.some(i=>i.severity==='minor')&&overall==='operational')overall='degraded';else if(activeIncidents.some(i=>i.severity==='maintenance')&&overall==='operational')overall='maintenance';
 
+  const lastSavedAt=components.map((c:any)=>c.lastSampleAt?new Date(c.lastSampleAt).getTime():0).filter((v:number)=>v>0).sort((a:number,b:number)=>b-a)[0]||0;
   return {
     enabled:config.enabled,domain:config.domain,title:config.title,description:config.description,logoUrl:config.logoUrl,
     refreshSeconds:SAMPLE_SECONDS,historyMinutes:HISTORY_MINUTES,overall,components,incidents:incidents.slice(0,20),activeIncidents,
-    generatedAt:new Date().toISOString(),monitoringSince:'v0.58.6',telemetry:{...current.telemetry,history:historyHealthy}
+    generatedAt:new Date().toISOString(),lastSavedAt:lastSavedAt?new Date(lastSavedAt).toISOString():null,monitoringSince:'v0.58.7',telemetry:{...current.telemetry,history:historyHealthy,historyError:historyQ.error}
   };
 }
