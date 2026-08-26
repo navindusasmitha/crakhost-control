@@ -1,12 +1,14 @@
 import {NextResponse} from 'next/server';
 import {getCurrentUser,isStaff} from '@/lib/auth';
 import {db} from '@/lib/db';
+import {reconcileProvisioningOrders} from '@/lib/provisioning-reconcile';
 
 export const dynamic='force-dynamic';
 
 export async function GET(){
   const user=await getCurrentUser();
   if(!isStaff(user))return NextResponse.json({error:'Forbidden'},{status:403});
+  const reconciliation=await reconcileProvisioningOrders().catch((e:any)=>({activated:0,staleFailed:0,activatedOrders:[],staleOrders:[],error:String(e?.message||e)}));
   const {rows}=await db.query(`
     select o.id,o.status,o.amount,o.currency,o.server_name,o.template_slug,o.failure_reason,o.created_at,o.updated_at,
            u.name customer_name,u.email customer_email,p.name plan_name,p.slug plan_slug,
@@ -29,10 +31,12 @@ export async function GET(){
     pending:rows.filter((x:any)=>x.status==='PENDING').length,
     active:rows.filter((x:any)=>x.status==='ACTIVE').length,
     provisioning:rows.filter((x:any)=>x.status==='PROVISIONING').length,
+    paidReady:rows.filter((x:any)=>x.status==='PAID'&&x.invoice_status==='PAID').length,
+    actionable:rows.filter((x:any)=>['PAID','PROVISIONING'].includes(x.status)).length,
     failed:rows.filter((x:any)=>x.status==='FAILED').length,
     dueInvoices:rows.filter((x:any)=>x.invoice_status==='DUE').length,
     refundedInvoices:rows.filter((x:any)=>x.invoice_status==='REFUNDED').length,
     revenue:rows.filter((x:any)=>x.invoice_status==='PAID').reduce((a:number,x:any)=>a+Number(x.amount||0),0)
   };
-  return NextResponse.json({orders:rows,summary},{headers:{'cache-control':'no-store'}});
+  return NextResponse.json({orders:rows,summary,reconciliation},{headers:{'cache-control':'no-store'}});
 }
