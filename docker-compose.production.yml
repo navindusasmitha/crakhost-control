@@ -74,16 +74,10 @@ services:
       - -c
       - |
         sleep 20
-        tick=0
         while true; do
-          if [ "$${tick}" -eq 0 ]; then
-            wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" "http://panel:4310/api/internal/status/sample?probe=1" || true
-            wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/alerts/dispatch || true
-          else
-            wget -qO- --timeout=15 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/status/sample || true
-          fi
-          tick=$$(( (tick + 1) % 6 ))
-          sleep 10
+          wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" "http://panel:4310/api/internal/status/sample?probe=1" || true
+          wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/alerts/dispatch || true
+          sleep 60
         done
     networks: [crakhost]
 
