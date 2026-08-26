@@ -2,13 +2,21 @@ import {db} from './db';
 import {nodeFetchFor} from './node';
 
 export type PublicStatus='operational'|'degraded'|'outage'|'maintenance';
+export type StatusRange='DAY'|'1H'|'5M'|'1M'|'1S';
 export type StatusComponent={id:string;name:string;source:string;enabled:boolean;manualStatus?:PublicStatus};
 export type StatusIncident={id:string;title:string;message:string;severity:'maintenance'|'minor'|'major';status:'investigating'|'identified'|'monitoring'|'resolved';createdAt:string;updatedAt:string;resolvedAt?:string|null};
 export type StatusConfig={enabled:boolean;domain:string;title:string;description:string;logoUrl:string;refreshSeconds:number;components:StatusComponent[];incidents:StatusIncident[]};
 
 type SafeRows={rows:any[];error:string|null};
-type LiveComponent=StatusComponent&{status:PublicStatus;detail:string};
+type LiveComponent=StatusComponent&{status:PublicStatus;detail:string;latencyMs:number|null};
 const LOGO='https://i.ibb.co/sv3BkwyS/logo-Photoroom.png';
+const RANGE_CONFIG:Record<StatusRange,{windowSeconds:number;bucketSeconds:number;points:number;label:string}>={
+  DAY:{windowSeconds:86400,bucketSeconds:3600,points:24,label:'LAST 24 HOURS'},
+  '1H':{windowSeconds:3600,bucketSeconds:120,points:30,label:'LAST 1 HOUR'},
+  '5M':{windowSeconds:300,bucketSeconds:10,points:30,label:'LAST 5 MINUTES'},
+  '1M':{windowSeconds:60,bucketSeconds:10,points:6,label:'LAST 1 MINUTE'},
+  '1S':{windowSeconds:15,bucketSeconds:1,points:15,label:'REAL-TIME (1S)'}
+};
 export const DEFAULT_STATUS_CONFIG:StatusConfig={
   enabled:true,
   domain:'uptime.crakbit.space',
@@ -25,6 +33,10 @@ export const DEFAULT_STATUS_CONFIG:StatusConfig={
   incidents:[]
 };
 
+export function normalizeStatusRange(value:any):StatusRange{
+  const v=String(value||'DAY').toUpperCase();
+  return (['DAY','1H','5M','1M','1S'] as StatusRange[]).includes(v as StatusRange)?v as StatusRange:'DAY';
+}
 function cleanStatus(value:any):PublicStatus{return ['operational','degraded','outage','maintenance'].includes(String(value))?value:'operational'}
 export function normalizeStatusConfig(raw:any):StatusConfig{
   const src=raw&&typeof raw==='object'?raw:{};
@@ -64,10 +76,6 @@ export async function getStatusConfig(){
   catch(error){console.error('[CrakHost Status] configuration read failed:',errorText(error));return normalizeStatusConfig(DEFAULT_STATUS_CONFIG)}
 }
 
-function dayKey(value:any):string|null{
-  if(typeof value==='string'){const match=value.match(/^\d{4}-\d{2}-\d{2}/);if(match)return match[0]}
-  const date=new Date(value);return Number.isFinite(date.getTime())?date.toISOString().slice(0,10):null;
-}
 function currentNodeStatus(node:any):PublicStatus{
   if(!node?.enabled)return'maintenance';
   const last=node.last_seen_at?new Date(node.last_seen_at).getTime():0;
@@ -82,26 +90,34 @@ function worst(values:PublicStatus[]):PublicStatus{
 }
 
 async function evaluateCurrent(config:StatusConfig){
-  const [nodesQ,databaseQ]=await Promise.all([
+  const dbStarted=Date.now();
+  const [nodesQ,nodeLatencyQ,databaseQ]=await Promise.all([
     safeRows(`select id,name,location,enabled,last_seen_at from nodes order by name`),
+    safeRows(`select distinct on(node_id) node_id,latency_ms,created_at from node_health_snapshots order by node_id,created_at desc`),
     safeRows(`select 1 as ok`)
   ]);
+  const databaseLatency=Math.max(0,Date.now()-dbStarted);
   const nodes=nodesQ.rows;
   const databaseHealthy=!databaseQ.error;
   const nodeInventoryHealthy=!nodesQ.error;
+  const latestLatency=new Map(nodeLatencyQ.rows.map((r:any)=>[String(r.node_id),Number.isFinite(Number(r.latency_ms))?Number(r.latency_ms):null]));
   const components:LiveComponent[]=config.components.filter(c=>c.enabled).map(c=>{
-    let status:PublicStatus='operational';let detail='Operational';
-    if(c.source==='panel'){status='operational';detail='Public status endpoint is responding'}
-    else if(c.source==='database'){status=databaseHealthy?'operational':'outage';detail=databaseHealthy?'Database is responding':'Database telemetry unavailable'}
+    let status:PublicStatus='operational';let detail='Operational';let latencyMs:number|null=null;
+    if(c.source==='panel'){status='operational';detail='Public status endpoint is responding';latencyMs=databaseLatency}
+    else if(c.source==='database'){status=databaseHealthy?'operational':'outage';detail=databaseHealthy?'Database is responding':'Database telemetry unavailable';latencyMs=databaseHealthy?databaseLatency:null}
     else if(c.source==='nodes'){
       if(!nodeInventoryHealthy){status='outage';detail='CrakNode inventory telemetry unavailable'}
-      else{const enabled=nodes.filter(n=>n.enabled);const states=enabled.map(currentNodeStatus);status=states.length?worst(states):'maintenance';const online=enabled.filter(n=>currentNodeStatus(n)==='operational').length;detail=`${online}/${enabled.length} nodes operational`}
+      else{
+        const enabled=nodes.filter((n:any)=>n.enabled);const states=enabled.map(currentNodeStatus);status=states.length?worst(states):'maintenance';const online=enabled.filter((n:any)=>currentNodeStatus(n)==='operational').length;detail=`${online}/${enabled.length} nodes operational`;
+        const latencies=enabled.map((n:any)=>latestLatency.get(String(n.id))).filter((v:any)=>Number.isFinite(Number(v))) as number[];
+        latencyMs=latencies.length?Math.round(latencies.reduce((a,b)=>a+b,0)/latencies.length):null;
+      }
     }else if(c.source.startsWith('node:')){
-      const id=c.source.slice(5);const n=nodes.find(x=>String(x.id)===id);
+      const id=c.source.slice(5);const n=nodes.find((x:any)=>String(x.id)===id);
       if(!nodeInventoryHealthy){status='outage';detail='Node telemetry unavailable'}
-      else{status=n?currentNodeStatus(n):'outage';detail=n?`${n.name} · ${n.location||'Unknown location'}`:'Node no longer exists'}
+      else{status=n?currentNodeStatus(n):'outage';detail=n?`${n.name} · ${n.location||'Unknown location'}`:'Node no longer exists';latencyMs=n?(latestLatency.get(String(n.id))??null):null}
     }else{status=cleanStatus(c.manualStatus);detail=status==='operational'?'Operational':status==='maintenance'?'Maintenance':status==='degraded'?'Degraded performance':'Service disruption'}
-    return {...c,status,detail};
+    return {...c,status,detail,latencyMs};
   });
   return {components,telemetry:{database:databaseHealthy,nodes:nodeInventoryHealthy}};
 }
@@ -126,8 +142,8 @@ async function refreshNodeTelemetry(){
   return {checked,online,error:null};
 }
 
-export async function recordPublicStatusSample(){
-  const nodeProbe=await refreshNodeTelemetry();
+export async function recordPublicStatusSample(probeNodes=false){
+  const nodeProbe=probeNodes?await refreshNodeTelemetry():{checked:0,online:0,error:null};
   const config=await getStatusConfig();
   if(!config.enabled)return {ok:true,disabled:true,sampled:0,nodeProbe};
   const current=await evaluateCurrent(config);
@@ -135,50 +151,55 @@ export async function recordPublicStatusSample(){
   for(const component of current.components){
     const result=await db.query(`insert into status_component_snapshots(component_id,status,detail,created_at)
       select $1,$2,$3,now()
-      where not exists(select 1 from status_component_snapshots where component_id=$1 and created_at>now()-interval '45 seconds')
+      where not exists(select 1 from status_component_snapshots where component_id=$1 and created_at>now()-interval '8 seconds')
       returning id`,[component.id,component.status,component.detail.slice(0,255)]).catch(()=>({rows:[]} as any));
     if(result.rows?.length)sampled+=1;
   }
-  await db.query(`delete from status_component_snapshots where created_at<now()-interval '45 days'`).catch(()=>null);
+  await db.query(`delete from status_component_snapshots where created_at<now()-interval '48 hours'`).catch(()=>null);
   await db.query(`delete from node_health_snapshots where created_at<now()-interval '45 days'`).catch(()=>null);
   return {ok:true,sampled,nodeProbe,generatedAt:new Date().toISOString()};
 }
 
-export async function buildPublicStatus(){
+export async function buildPublicStatus(requestedRange:StatusRange='DAY'){
+  const range=normalizeStatusRange(requestedRange);
+  const rangeCfg=RANGE_CONFIG[range];
   const config=await getStatusConfig();
   const [current,historyQ]=await Promise.all([
     evaluateCurrent(config),
-    safeRows(`select component_id,to_char(date_trunc('day',created_at),'YYYY-MM-DD') day,
+    safeRows(`select component_id,
+      date_bin(make_interval(secs => $1::int),created_at,timestamptz '1970-01-01 00:00:00+00') bucket,
       count(*) filter(where status<>'maintenance')::int samples,
       count(*) filter(where status='operational')::int online,
       min(created_at) first_seen,max(created_at) last_seen
       from status_component_snapshots
-      where created_at>=now()-interval '30 days'
-      group by component_id,2 order by 2`)
+      where created_at>=now()-($2::int*interval '1 second')
+      group by component_id,2 order by 2`,[rangeCfg.bucketSeconds,rangeCfg.windowSeconds])
   ]);
-  const history=current.components.length&&historyQ.rows||[];
+  const history=historyQ.rows||[];
   const historyHealthy=!historyQ.error;
-  const days=Array.from({length:30},(_,i)=>{const d=new Date();d.setUTCHours(0,0,0,0);d.setUTCDate(d.getUTCDate()-(29-i));return d.toISOString().slice(0,10)});
+  const bucketMs=rangeCfg.bucketSeconds*1000;
+  const endBucket=Math.floor(Date.now()/bucketMs)*bucketMs;
+  const expectedBuckets=Array.from({length:rangeCfg.points},(_,i)=>endBucket-(rangeCfg.points-1-i)*bucketMs);
 
   const components=current.components.map(c=>{
     const relevant=history.filter((h:any)=>String(h.component_id)===c.id);
-    const historyBars=days.map(day=>{
-      if(!historyHealthy)return{day,uptime:null,samples:0};
-      const rows=relevant.filter((h:any)=>dayKey(h.day)===day);
-      const samples=rows.reduce((s:number,h:any)=>s+Number(h.samples||0),0);
-      const online=rows.reduce((s:number,h:any)=>s+Number(h.online||0),0);
-      return{day,uptime:samples?Math.round((online/samples)*1000)/10:null,samples};
+    const byBucket=new Map<number,any>();
+    for(const row of relevant){const t=new Date(row.bucket).getTime();if(Number.isFinite(t))byBucket.set(Math.floor(t/bucketMs)*bucketMs,row)}
+    const historyBars=expectedBuckets.map(bucket=>{
+      if(!historyHealthy)return{bucket:new Date(bucket).toISOString(),uptime:null,samples:0};
+      const row=byBucket.get(bucket);const samples=Number(row?.samples||0),online=Number(row?.online||0);
+      return{bucket:new Date(bucket).toISOString(),uptime:samples?Math.round((online/samples)*1000)/10:null,samples};
     });
     const totalSamples=historyBars.reduce((s,x)=>s+Number(x.samples||0),0);
     const weightedOnline=historyBars.reduce((s,x)=>s+(x.uptime===null?0:Number(x.uptime)*Number(x.samples||0)/100),0);
-    const uptime30d=totalSamples?Math.round((weightedOnline/totalSamples)*10000)/100:null;
-    const trackedDays=historyBars.filter(x=>x.samples>0).length;
+    const uptimeRange=totalSamples?Math.round((weightedOnline/totalSamples)*10000)/100:(c.status==='operational'?100:c.status==='maintenance'?null:0);
+    const trackedBuckets=historyBars.filter(x=>x.samples>0).length;
     const firstSeen=relevant.map((h:any)=>new Date(h.first_seen).getTime()).filter(Number.isFinite).sort((a:number,b:number)=>a-b)[0];
-    return {...c,uptime30d,trackedDays,sampleCount:totalSamples,monitoringStartedAt:firstSeen?new Date(firstSeen).toISOString():null,history:historyBars};
+    return {...c,uptimeRange,uptime30d:uptimeRange,trackedBuckets,sampleCount:totalSamples,monitoringStartedAt:firstSeen?new Date(firstSeen).toISOString():null,history:historyBars};
   });
   const incidents=[...config.incidents].sort((a,b)=>new Date(b.updatedAt).getTime()-new Date(a.updatedAt).getTime());
   const activeIncidents=incidents.filter(i=>i.status!=='resolved');
   let overall=worst(components.map(c=>c.status));
   if(activeIncidents.some(i=>i.severity==='major'))overall='outage';else if(activeIncidents.some(i=>i.severity==='minor')&&overall==='operational')overall='degraded';else if(activeIncidents.some(i=>i.severity==='maintenance')&&overall==='operational')overall='maintenance';
-  return {enabled:config.enabled,domain:config.domain,title:config.title,description:config.description,logoUrl:config.logoUrl,refreshSeconds:config.refreshSeconds,overall,components,incidents:incidents.slice(0,20),activeIncidents,generatedAt:new Date().toISOString(),monitoringSince:'v0.58.4',telemetry:{...current.telemetry,history:historyHealthy}};
+  return {enabled:config.enabled,domain:config.domain,title:config.title,description:config.description,logoUrl:config.logoUrl,refreshSeconds:config.refreshSeconds,range,rangeLabel:rangeCfg.label,bucketSeconds:rangeCfg.bucketSeconds,overall,components,incidents:incidents.slice(0,20),activeIncidents,generatedAt:new Date().toISOString(),monitoringSince:'v0.58.4',telemetry:{...current.telemetry,history:historyHealthy}};
 }

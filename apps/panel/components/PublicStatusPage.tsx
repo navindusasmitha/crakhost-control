@@ -1,53 +1,134 @@
 'use client';
 import {useEffect,useMemo,useState} from 'react';
-import {Activity,CheckCircle2,Clock3,RefreshCw,TriangleAlert,XCircle} from 'lucide-react';
+import styles from './PublicStatusPage.module.css';
 
-const tone:any={operational:{label:'All Systems Operational',color:'#34d399',bg:'rgba(16,185,129,.12)',icon:CheckCircle2},degraded:{label:'Degraded Performance',color:'#fbbf24',bg:'rgba(245,158,11,.12)',icon:TriangleAlert},outage:{label:'Service Disruption',color:'#fb7185',bg:'rgba(244,63,94,.12)',icon:XCircle},maintenance:{label:'Maintenance in Progress',color:'#a78bfa',bg:'rgba(139,92,246,.12)',icon:Clock3}};
+type Range='DAY'|'1H'|'5M'|'1M'|'1S';
+type LivePoint={status:string;latencyMs:number|null;at:string};
+const ranges:{key:Range;label:string}[]=[
+  {key:'DAY',label:'DAY'},
+  {key:'1H',label:'1H'},
+  {key:'5M',label:'5M'},
+  {key:'1M',label:'1M'},
+  {key:'1S',label:'LIVE (1S)'}
+];
 
 export default function PublicStatusPage(){
-  const[data,setData]=useState<any>(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
-  async function load(){setBusy(true);try{const r=await fetch('/api/public/status',{cache:'no-store'});const j=await r.json();if(!r.ok&&r.status!==503)throw new Error(j.error||'Status unavailable');setData(j);setError('')}catch(e:any){setError(e.message||'Status unavailable')}finally{setBusy(false)}}
-  useEffect(()=>{void load()},[]);
-  useEffect(()=>{const seconds=Math.min(300,Math.max(15,Number(data?.refreshSeconds)||30));const tick=()=>{if(!document.hidden)void load()};const id=window.setInterval(tick,seconds*1000);document.addEventListener('visibilitychange',tick);return()=>{window.clearInterval(id);document.removeEventListener('visibilitychange',tick)}},[data?.refreshSeconds]);
-  const overall=useMemo(()=>tone[data?.overall]||tone.outage,[data]);
-  if(!data)return <main style={shell}><div style={wrap}><div style={loading}><RefreshCw className={busy?'spin':''} size={22}/><span>{error||'Loading CrakHost status…'}</span></div></div></main>;
-  const OverallIcon=overall.icon;
-  return <main style={shell}><div style={wrap}>
-    <header style={header}><div style={{display:'flex',alignItems:'center',gap:14}}>{data.logoUrl&&<img src={data.logoUrl} alt="CrakHost" style={{height:46,maxWidth:190,objectFit:'contain'}}/>}<div><h1 style={h1}>{data.title}</h1><p style={sub}>{data.description}</p></div></div><button onClick={load} disabled={busy} style={refresh}><RefreshCw size={15} className={busy?'spin':''}/>Refresh</button></header>
-    <section style={{...banner,background:overall.bg,borderColor:`${overall.color}55`,color:overall.color}}><OverallIcon size={22}/><div><b style={{fontSize:17}}>{overall.label}</b><div style={{fontSize:12,opacity:.78,marginTop:2}}>Last checked {fmt(data.generatedAt)}</div></div></section>
+  const[range,setRange]=useState<Range>('1S');
+  const[data,setData]=useState<any>(null);
+  const[error,setError]=useState('');
+  const[busy,setBusy]=useState(false);
+  const[clock,setClock]=useState('00:00:00');
+  const[liveSeries,setLiveSeries]=useState<Record<string,LivePoint[]>>({});
 
-    {Array.isArray(data.activeIncidents)&&data.activeIncidents.length>0&&<section style={{marginTop:22}}><h2 style={sectionTitle}>Active incidents</h2><div style={{display:'grid',gap:10}}>{data.activeIncidents.map((x:any)=><article key={x.id} style={incident}><div style={{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center'}}><b>{x.title}</b><span style={pill}>{String(x.status).replace('_',' ')}</span></div><p style={{margin:'8px 0 0',color:'#a9b0bf',fontSize:13,lineHeight:1.6}}>{x.message}</p><small style={{color:'#626a7a'}}>Updated {fmt(x.updatedAt)}</small></article>)}</div></section>}
+  async function load(target:Range=range){
+    setBusy(true);
+    try{
+      const r=await fetch(`/api/public/status?range=${encodeURIComponent(target)}`,{cache:'no-store'});
+      const j=await r.json();
+      if(!r.ok&&r.status!==503)throw new Error(j.error||'Status unavailable');
+      setData(j);setError('');
+      if(target==='1S'&&Array.isArray(j.components)){
+        setLiveSeries(prev=>{
+          const next={...prev};
+          for(const component of j.components){
+            const id=String(component.id);const list=[...(next[id]||[])];
+            list.push({status:String(component.status||'outage'),latencyMs:Number.isFinite(Number(component.latencyMs))?Number(component.latencyMs):null,at:String(j.generatedAt||new Date().toISOString())});
+            next[id]=list.slice(-15);
+          }
+          return next;
+        });
+      }
+    }catch(e:any){setError(e?.message||'Status unavailable')}
+    finally{setBusy(false)}
+  }
 
-    <section style={{marginTop:26}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'end',gap:12}}><div><h2 style={sectionTitle}>Services</h2><p style={sub}>Live component health and continuously sampled availability history.</p></div><Activity size={18} color="#7c83a0"/></div><div style={{display:'grid',gap:12,marginTop:12}}>{(data.components||[]).map((c:any)=><ComponentRow key={c.id} item={c}/>)}</div></section>
+  useEffect(()=>{
+    void load(range);
+    const tick=()=>{if(!document.hidden)void load(range)};
+    const id=window.setInterval(tick,range==='1S'?1000:10000);
+    document.addEventListener('visibilitychange',tick);
+    return()=>{window.clearInterval(id);document.removeEventListener('visibilitychange',tick)};
+  },[range]);
+  useEffect(()=>{
+    const update=()=>setClock(new Date().toLocaleTimeString(undefined,{hour12:false}));
+    update();const id=window.setInterval(update,1000);return()=>window.clearInterval(id);
+  },[]);
 
-    {Array.isArray(data.incidents)&&data.incidents.some((x:any)=>x.status==='resolved')&&<section style={{marginTop:28}}><h2 style={sectionTitle}>Recent incident history</h2><div style={{display:'grid',gap:10}}>{data.incidents.filter((x:any)=>x.status==='resolved').slice(0,8).map((x:any)=><article key={x.id} style={incident}><div style={{display:'flex',justifyContent:'space-between',gap:12}}><b>{x.title}</b><span style={{...pill,color:'#34d399'}}>resolved</span></div><p style={{margin:'6px 0',color:'#8f97a8',fontSize:12}}>{x.message}</p><small style={{color:'#626a7a'}}>Resolved {fmt(x.resolvedAt||x.updatedAt)}</small></article>)}</div></section>}
+  const overall=String(data?.overall||'outage');
+  const pulse=overall==='operational'?'STABLE':overall==='maintenance'?'MAINTENANCE':overall==='degraded'?'DEGRADED':'DISRUPTION';
+  const pulseClass=overall==='operational'?styles.pulseGood:overall==='degraded'||overall==='maintenance'?styles.pulseWarn:styles.pulseBad;
+  const activeIncident=Array.isArray(data?.activeIncidents)?data.activeIncidents[0]:null;
+  const activeRangeLabel=range==='1S'?'REAL-TIME (1S)':data?.rangeLabel||range;
+  const components=Array.isArray(data?.components)?data.components:[];
+  const title=String(data?.title||'CrakHost Status');
+  const logo=String(data?.logoUrl||'');
 
-    <footer style={footer}>Powered by CrakHost Control · Availability is sampled automatically every minute.</footer>
-  </div></main>
+  return <main className={styles.shell}>
+    <div className={styles.nebula}/>
+    <section className={styles.dashboard}>
+      <header className={styles.header}>
+        <div className={styles.logoWrap}>
+          {logo?<img src={logo} alt={title} className={styles.logoImg}/>:null}
+          <div><h1 className={styles.brand}>CrakHost <span>Hologram</span></h1><p className={styles.kicker}>VIRTUAL INFRASTRUCTURE LIVE</p></div>
+        </div>
+        <div className={styles.controls}>
+          <div className={styles.resPillBox} aria-label="Uptime history resolution">
+            {ranges.map(item=><button key={item.key} type="button" className={`${styles.resPill} ${range===item.key?styles.resPillActive:''}`} onClick={()=>setRange(item.key)}>{item.label}</button>)}
+          </div>
+          <div className={styles.clock}>{clock}</div>
+        </div>
+      </header>
+
+      {activeIncident?<div className={styles.incident}><span className={styles.incidentBadge}>{String(activeIncident.status||'incident')}</span><strong>{activeIncident.title}</strong><span className={styles.incidentText}>{activeIncident.message}</span></div>:null}
+
+      <div className={styles.grid}>
+        {components.length?components.slice(0,12).map((item:any)=><HoloCard key={item.id} item={item} range={range} live={liveSeries[String(item.id)]||[]}/>):<div className={styles.empty}>{error||'Waiting for public status components…'}</div>}
+      </div>
+
+      <footer className={styles.footer}>
+        <span>SYSTEM PULSE: <span className={pulseClass}>{pulse}</span></span>
+        <span className={styles.activeView}>ACTIVE VIEW: {activeRangeLabel}</span>
+        <span className={styles.copyright}>© CRAKHOST ELITE</span>
+      </footer>
+      {busy?<div className={styles.refreshing}>SYNCING LIVE TELEMETRY</div>:null}
+    </section>
+  </main>
 }
 
-function ComponentRow({item}:{item:any}){
-  const t=tone[item.status]||tone.outage;const Icon=t.icon;
-  const hasUptime=Number.isFinite(Number(item.uptime30d));
-  const metric=hasUptime?`${Number(item.uptime30d).toFixed(Number(item.uptime30d)%1===0?0:2)}% uptime`:'Collecting uptime';
-  const tracking=Number(item.trackedDays||0)>0?`${item.trackedDays} day${Number(item.trackedDays)===1?'':'s'} tracked · ${Number(item.sampleCount||0)} samples`:'First sample pending';
-  return <article style={component}>
-    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:14}}><div><b style={{fontSize:14}}>{item.name}</b><div style={{color:'#747d90',fontSize:11,marginTop:3}}>{item.detail}</div></div><span style={{display:'inline-flex',alignItems:'center',gap:6,color:t.color,fontSize:11,fontWeight:800}}><Icon size={14}/>{String(item.status).toUpperCase()}</span></div>
-    <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:12,marginTop:13}}><strong style={{fontSize:18,color:hasUptime?'#eef0f7':'#81899b'}}>{metric}</strong><span style={{fontSize:10,color:'#60697a'}}>{tracking}</span></div>
-    <div style={{display:'flex',gap:3,marginTop:10,alignItems:'stretch'}}>{(item.history||[]).map((h:any)=><span key={h.day} title={`${h.day}: ${h.uptime===null?'No samples':`${h.uptime}% uptime · ${h.samples||0} samples`}`} style={{height:24,flex:1,borderRadius:3,background:h.uptime===null?'#202532':h.uptime>=99?'#22c55e':h.uptime>=90?'#f59e0b':'#ef4444',opacity:h.uptime===null?.55:.9}}/>)}</div>
-    <div style={{display:'flex',justifyContent:'space-between',marginTop:7,color:'#596173',fontSize:10}}><span>30 days ago</span><span>{item.monitoringStartedAt?`Monitoring since ${shortDate(item.monitoringStartedAt)}`:'Monitoring starts after this update'}</span><span>Today</span></div>
+function HoloCard({item,range,live}:{item:any;range:Range;live:LivePoint[]}){
+  const bars=useMemo(()=>range==='1S'?liveBars(live):historyBars(item.history),[range,live,item.history]);
+  const liveUptime=useMemo(()=>{
+    const known=live.filter(x=>x.status!=='maintenance');if(!known.length)return null;
+    return known.filter(x=>x.status==='operational').length*100/known.length;
+  },[live]);
+  const raw=range==='1S'?liveUptime:Number(item.uptimeRange);
+  const uptime=Number.isFinite(Number(raw))?Number(raw):null;
+  const status=String(item.status||'outage');
+  const stateLabel=status==='operational'?'ACTIVE':status==='maintenance'?'MAINTENANCE':status==='degraded'?'DEGRADED':'OUTAGE';
+  const latency=Number.isFinite(Number(item.latencyMs))?`${Math.round(Number(item.latencyMs))}ms`:'--';
+  return <article className={styles.card}>
+    <div className={styles.cardHead}>
+      <div style={{minWidth:0}}><h3 className={styles.serviceName}>{item.name}</h3><p className={styles.serviceDetail}>{item.detail||'Node: Stable'}</p></div>
+      <div className={styles.state} style={{color:status==='operational'?'#00ffaa':status==='degraded'?'#f8b84e':status==='maintenance'?'#b894ff':'#ff477e'}}>{stateLabel}</div>
+    </div>
+    <div className={`${styles.uptime} ${uptime===null?styles.uptimeMuted:''}`}>{uptime===null?'--':`${uptime.toFixed(uptime>=99.995?2:uptime>=99?2:1)}%`}</div>
+    <div className={styles.bars}>{bars.map((bar:any,index:number)=>{
+      const level=bar?.uptime;const last=index===bars.length-1;const liveNow=range==='1S'&&last&&bar?.known;
+      const cls=level===null||level===undefined?styles.barUnknown:level>=99?styles.barGood:level>=90?styles.barWarn:styles.barBad;
+      const height=10+((index*7+String(item.id).length*3)%16);
+      return <span key={`${bar?.key||index}-${index}`} title={bar?.title||''} className={`${styles.bar} ${cls} ${liveNow?styles.barLive:''}`} style={{height:liveNow?30:height}}/>;
+    })}</div>
+    <div className={styles.meta}><span>LATENCY: {latency}</span><span>{range==='1S'?`${live.length}/15 LIVE SAMPLES`:`${Number(item.sampleCount||0)} SAMPLES`}</span><span>{range}</span></div>
   </article>
 }
-function fmt(v:any){const d=new Date(v);return Number.isFinite(d.getTime())?d.toLocaleString():''}
-function shortDate(v:any){const d=new Date(v);return Number.isFinite(d.getTime())?d.toLocaleDateString(undefined,{month:'short',day:'numeric'}):''}
-const shell:React.CSSProperties={minHeight:'100vh',background:'radial-gradient(circle at 50% -10%,rgba(99,102,241,.14),transparent 30%),#07080d',color:'#eef0f7',fontFamily:'Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',padding:'36px 16px'};
-const wrap:React.CSSProperties={width:'min(920px,100%)',margin:'0 auto'};
-const header:React.CSSProperties={display:'flex',justifyContent:'space-between',alignItems:'center',gap:18,flexWrap:'wrap',padding:'8px 0 22px'};
-const h1:React.CSSProperties={margin:0,fontSize:26,lineHeight:1.1};const sub:React.CSSProperties={margin:'6px 0 0',color:'#7f8798',fontSize:12,lineHeight:1.5};
-const refresh:React.CSSProperties={display:'inline-flex',alignItems:'center',gap:7,border:'1px solid #252b39',background:'#10131b',color:'#cdd2dd',padding:'9px 12px',borderRadius:10,cursor:'pointer'};
-const banner:React.CSSProperties={display:'flex',alignItems:'center',gap:12,border:'1px solid',borderRadius:15,padding:'17px 18px'};
-const sectionTitle:React.CSSProperties={fontSize:15,margin:0,color:'#f3f4f8'};
-const component:React.CSSProperties={background:'rgba(15,17,24,.88)',border:'1px solid #202531',borderRadius:15,padding:'16px 17px'};
-const incident:React.CSSProperties={background:'#10131b',border:'1px solid #252b39',borderRadius:13,padding:'14px 15px'};
-const pill:React.CSSProperties={border:'1px solid #303748',borderRadius:999,padding:'4px 8px',fontSize:9,textTransform:'uppercase',letterSpacing:'.06em',color:'#c1c6d3'};
-const footer:React.CSSProperties={padding:'30px 0 8px',textAlign:'center',color:'#4f5768',fontSize:11};const loading:React.CSSProperties={minHeight:'70vh',display:'flex',alignItems:'center',justifyContent:'center',gap:10,color:'#8b93a5'};
+
+function historyBars(history:any){
+  if(!Array.isArray(history)||!history.length)return Array.from({length:30},(_,i)=>({key:i,uptime:null,title:'No sample',known:false}));
+  return history.map((h:any,i:number)=>({key:h.bucket||i,uptime:h.uptime===null?null:Number(h.uptime),known:Number(h.samples||0)>0,title:`${fmtShort(h.bucket)} · ${h.uptime===null?'No sample':`${h.uptime}% uptime`} · ${h.samples||0} samples`}));
+}
+function liveBars(points:LivePoint[]){
+  const padded:Array<LivePoint|null>=[...Array(Math.max(0,15-points.length)).fill(null),...points.slice(-15)];
+  return padded.map((p,i)=>({key:p?.at||i,uptime:p?statusPercent(p.status):null,known:!!p,title:p?`${fmtShort(p.at)} · ${p.status.toUpperCase()}${p.latencyMs!==null?` · ${p.latencyMs}ms`:''}`:'Waiting for live sample'}));
+}
+function statusPercent(status:string){return status==='operational'?100:status==='maintenance'?null:status==='degraded'?95:0}
+function fmtShort(v:any){const d=new Date(v);return Number.isFinite(d.getTime())?d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'}):''}
