@@ -7,7 +7,8 @@ const tone:any={operational:{label:'All Systems Operational',color:'#34d399',bg:
 export default function PublicStatusPage(){
   const[data,setData]=useState<any>(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   async function load(){setBusy(true);try{const r=await fetch('/api/public/status',{cache:'no-store'});const j=await r.json();if(!r.ok&&r.status!==503)throw new Error(j.error||'Status unavailable');setData(j);setError('')}catch(e:any){setError(e.message||'Status unavailable')}finally{setBusy(false)}}
-  useEffect(()=>{void load();const tick=()=>{if(!document.hidden)void load()};const id=window.setInterval(tick,30000);document.addEventListener('visibilitychange',tick);return()=>{window.clearInterval(id);document.removeEventListener('visibilitychange',tick)}},[]);
+  useEffect(()=>{void load()},[]);
+  useEffect(()=>{const seconds=Math.min(300,Math.max(15,Number(data?.refreshSeconds)||30));const tick=()=>{if(!document.hidden)void load()};const id=window.setInterval(tick,seconds*1000);document.addEventListener('visibilitychange',tick);return()=>{window.clearInterval(id);document.removeEventListener('visibilitychange',tick)}},[data?.refreshSeconds]);
   const overall=useMemo(()=>tone[data?.overall]||tone.outage,[data]);
   if(!data)return <main style={shell}><div style={wrap}><div style={loading}><RefreshCw className={busy?'spin':''} size={22}/><span>{error||'Loading CrakHost status…'}</span></div></div></main>;
   const OverallIcon=overall.icon;
@@ -17,16 +18,28 @@ export default function PublicStatusPage(){
 
     {Array.isArray(data.activeIncidents)&&data.activeIncidents.length>0&&<section style={{marginTop:22}}><h2 style={sectionTitle}>Active incidents</h2><div style={{display:'grid',gap:10}}>{data.activeIncidents.map((x:any)=><article key={x.id} style={incident}><div style={{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center'}}><b>{x.title}</b><span style={pill}>{String(x.status).replace('_',' ')}</span></div><p style={{margin:'8px 0 0',color:'#a9b0bf',fontSize:13,lineHeight:1.6}}>{x.message}</p><small style={{color:'#626a7a'}}>Updated {fmt(x.updatedAt)}</small></article>)}</div></section>}
 
-    <section style={{marginTop:26}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'end',gap:12}}><div><h2 style={sectionTitle}>Services</h2><p style={sub}>Live component health with up to 30 days of CrakNode history.</p></div><Activity size={18} color="#7c83a0"/></div><div style={{display:'grid',gap:12,marginTop:12}}>{(data.components||[]).map((c:any)=><ComponentRow key={c.id} item={c}/>)}</div></section>
+    <section style={{marginTop:26}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'end',gap:12}}><div><h2 style={sectionTitle}>Services</h2><p style={sub}>Live component health and continuously sampled availability history.</p></div><Activity size={18} color="#7c83a0"/></div><div style={{display:'grid',gap:12,marginTop:12}}>{(data.components||[]).map((c:any)=><ComponentRow key={c.id} item={c}/>)}</div></section>
 
     {Array.isArray(data.incidents)&&data.incidents.some((x:any)=>x.status==='resolved')&&<section style={{marginTop:28}}><h2 style={sectionTitle}>Recent incident history</h2><div style={{display:'grid',gap:10}}>{data.incidents.filter((x:any)=>x.status==='resolved').slice(0,8).map((x:any)=><article key={x.id} style={incident}><div style={{display:'flex',justifyContent:'space-between',gap:12}}><b>{x.title}</b><span style={{...pill,color:'#34d399'}}>resolved</span></div><p style={{margin:'6px 0',color:'#8f97a8',fontSize:12}}>{x.message}</p><small style={{color:'#626a7a'}}>Resolved {fmt(x.resolvedAt||x.updatedAt)}</small></article>)}</div></section>}
 
-    <footer style={footer}>Powered by CrakHost Control · Public status refreshes automatically.</footer>
+    <footer style={footer}>Powered by CrakHost Control · Availability is sampled automatically every minute.</footer>
   </div></main>
 }
 
-function ComponentRow({item}:{item:any}){const t=tone[item.status]||tone.outage;const Icon=t.icon;return <article style={component}><div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:14}}><div><b style={{fontSize:14}}>{item.name}</b><div style={{color:'#747d90',fontSize:11,marginTop:3}}>{item.detail}</div></div><span style={{display:'inline-flex',alignItems:'center',gap:6,color:t.color,fontSize:11,fontWeight:800}}><Icon size={14}/>{String(item.status).toUpperCase()}</span></div><div style={{display:'flex',gap:3,marginTop:14,alignItems:'stretch'}}>{(item.history||[]).map((h:any)=><span key={h.day} title={`${h.day}: ${h.uptime===null?'No samples':`${h.uptime}%`}`} style={{height:24,flex:1,borderRadius:3,background:h.uptime===null?'#202532':h.uptime>=99?'#22c55e':h.uptime>=90?'#f59e0b':'#ef4444',opacity:h.uptime===null?.55:.9}}/>)}</div><div style={{display:'flex',justifyContent:'space-between',marginTop:7,color:'#596173',fontSize:10}}><span>30 days ago</span><span>{item.uptime30d===null?'History collecting':`${item.uptime30d}% uptime`}</span><span>Today</span></div></article>}
+function ComponentRow({item}:{item:any}){
+  const t=tone[item.status]||tone.outage;const Icon=t.icon;
+  const hasUptime=Number.isFinite(Number(item.uptime30d));
+  const metric=hasUptime?`${Number(item.uptime30d).toFixed(Number(item.uptime30d)%1===0?0:2)}% uptime`:'Collecting uptime';
+  const tracking=Number(item.trackedDays||0)>0?`${item.trackedDays} day${Number(item.trackedDays)===1?'':'s'} tracked · ${Number(item.sampleCount||0)} samples`:'First sample pending';
+  return <article style={component}>
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:14}}><div><b style={{fontSize:14}}>{item.name}</b><div style={{color:'#747d90',fontSize:11,marginTop:3}}>{item.detail}</div></div><span style={{display:'inline-flex',alignItems:'center',gap:6,color:t.color,fontSize:11,fontWeight:800}}><Icon size={14}/>{String(item.status).toUpperCase()}</span></div>
+    <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:12,marginTop:13}}><strong style={{fontSize:18,color:hasUptime?'#eef0f7':'#81899b'}}>{metric}</strong><span style={{fontSize:10,color:'#60697a'}}>{tracking}</span></div>
+    <div style={{display:'flex',gap:3,marginTop:10,alignItems:'stretch'}}>{(item.history||[]).map((h:any)=><span key={h.day} title={`${h.day}: ${h.uptime===null?'No samples':`${h.uptime}% uptime · ${h.samples||0} samples`}`} style={{height:24,flex:1,borderRadius:3,background:h.uptime===null?'#202532':h.uptime>=99?'#22c55e':h.uptime>=90?'#f59e0b':'#ef4444',opacity:h.uptime===null?.55:.9}}/>)}</div>
+    <div style={{display:'flex',justifyContent:'space-between',marginTop:7,color:'#596173',fontSize:10}}><span>30 days ago</span><span>{item.monitoringStartedAt?`Monitoring since ${shortDate(item.monitoringStartedAt)}`:'Monitoring starts after this update'}</span><span>Today</span></div>
+  </article>
+}
 function fmt(v:any){const d=new Date(v);return Number.isFinite(d.getTime())?d.toLocaleString():''}
+function shortDate(v:any){const d=new Date(v);return Number.isFinite(d.getTime())?d.toLocaleDateString(undefined,{month:'short',day:'numeric'}):''}
 const shell:React.CSSProperties={minHeight:'100vh',background:'radial-gradient(circle at 50% -10%,rgba(99,102,241,.14),transparent 30%),#07080d',color:'#eef0f7',fontFamily:'Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',padding:'36px 16px'};
 const wrap:React.CSSProperties={width:'min(920px,100%)',margin:'0 auto'};
 const header:React.CSSProperties={display:'flex',justifyContent:'space-between',alignItems:'center',gap:18,flexWrap:'wrap',padding:'8px 0 22px'};
