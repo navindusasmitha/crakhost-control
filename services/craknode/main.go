@@ -13,7 +13,7 @@ import (
     "time"
 )
 
-const version = "0.44.0"
+const version = "0.59.0"
 
 var safeID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$`)
 var safeEnvKey = regexp.MustCompile(`^[A-Z0-9_]{1,64}$`)
@@ -38,6 +38,15 @@ type serverStatus struct {
     MemoryLimit float64 `json:"memoryLimit"`
     Uptime string `json:"uptime"`
     Health string `json:"health,omitempty"`
+    ExitCode int `json:"exitCode"`
+    OOMKilled bool `json:"oomKilled"`
+    StateError string `json:"stateError,omitempty"`
+    RestartCount int `json:"restartCount"`
+    StartedAt string `json:"startedAt,omitempty"`
+    FinishedAt string `json:"finishedAt,omitempty"`
+    Image string `json:"image,omitempty"`
+    ContainerID string `json:"containerId,omitempty"`
+    RuntimeNetwork string `json:"runtimeNetwork,omitempty"`
 }
 
 func main() {
@@ -71,6 +80,7 @@ func main() {
             "memoryAvailableMb":pressure.MemoryAvailableMB,
             "memoryUsedPct":pressure.MemoryUsedPct,
             "pressureLevel":pressure.Level,
+            "databaseContainer":databaseContainer(),
             "time":time.Now().UTC(),
         }
         if dockerErr == nil { out["dockerVersion"] = strings.TrimSpace(dockerVersion) } else { out["dockerError"] = cleanErr(dockerVersion,dockerErr) }
@@ -114,13 +124,13 @@ func (a api) serverRouter(w http.ResponseWriter, r *http.Request) {
     switch op {
     case "status": a.only(w,r,http.MethodGet,func(){a.status(w,container)})
     case "logs": a.only(w,r,http.MethodGet,func(){a.logs(w,container)})
-    case "action": a.only(w,r,http.MethodPost,func(){a.action(w,r,container)})
+    case "action": a.only(w,r,http.MethodPost,func(){a.action(w,r,id,container)})
     case "command": a.only(w,r,http.MethodPost,func(){a.command(w,r,container)})
     case "create": a.only(w,r,http.MethodPost,func(){a.create(w,r,id,container)})
     case "files": a.files(w,r,container)
     case "backup": a.only(w,r,http.MethodPost,func(){a.backup(w,r,id,container)})
     case "restore": a.only(w,r,http.MethodPost,func(){a.restore(w,r,id,container)})
-    case "delete": a.only(w,r,http.MethodPost,func(){a.deleteServer(w,container)})
+    case "delete": a.only(w,r,http.MethodPost,func(){a.deleteServer(w,id,container)})
     default: jsonOut(w,404,map[string]string{"error":"endpoint not found"})
     }
 }
@@ -137,6 +147,45 @@ func lineCount(v string) int {
 }
 
 func containerFor(id string) string { return "crakhost-" + id }
+func serverNetwork(id string) string { return "crakhost-net-" + id }
+
+func databaseContainer() string {
+    if explicit:=strings.TrimSpace(os.Getenv("CRAKNODE_DATABASE_CONTAINER"));explicit!="" { return explicit }
+    project:=env("CRAKNODE_DATABASE_PROJECT","crakhost-control")
+    raw,err:=docker("ps","--filter","label=com.docker.compose.project="+project,"--filter","label=com.docker.compose.service=postgres","--format","{{.ID}}")
+    if err!=nil{return ""}
+    lines:=strings.Fields(raw);if len(lines)==0{return ""};return lines[0]
+}
+
+func networkHasContainer(network, container string) bool {
+    if network==""||container==""{return false}
+    raw,err:=docker("inspect","-f","{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}",container)
+    if err!=nil{return false}
+    for _,name:=range strings.Fields(raw){if name==network{return true}}
+    return false
+}
+
+func ensureRuntimeNetwork(id, container string) string {
+    network:=serverNetwork(id)
+    if _,err:=docker("network","inspect",network);err!=nil {
+        _,_=docker("network","create","--label","crakhost.managed=true","--label","crakhost.server="+id,network)
+    }
+    if dbContainer:=databaseContainer();dbContainer!=""&&!networkHasContainer(network,dbContainer) {
+        _,_=docker("network","connect","--alias","postgres",network,dbContainer)
+    }
+    if container!="" {
+        if _,err:=docker("inspect",container);err==nil&&!networkHasContainer(network,container) {
+            _,_=docker("network","connect",network,container)
+        }
+    }
+    return network
+}
+
+func cleanupRuntimeNetwork(id string) {
+    network:=serverNetwork(id)
+    if dbContainer:=databaseContainer();dbContainer!="" { _,_=docker("network","disconnect","-f",network,dbContainer) }
+    _,_=docker("network","rm",network)
+}
 
 func (a api) create(w http.ResponseWriter, r *http.Request, id, container string) {
     var b createBody
@@ -157,38 +206,46 @@ func (a api) create(w http.ResponseWriter, r *http.Request, id, container string
     if _, err := docker("inspect",container); err == nil {
         jsonOut(w,409,map[string]string{"error":"container already exists"});return
     }
-    args := []string{"run","-d","--name",container,"--restart","unless-stopped","--memory",fmt.Sprintf("%dm",b.MemoryMB),"--cpus",fmt.Sprintf("%.2f",b.CPU),"--dns",env("CRAKNODE_DNS_PRIMARY","1.1.1.1"),"--dns",env("CRAKNODE_DNS_SECONDARY","8.8.8.8"),"-p",fmt.Sprintf("%d:%d",b.HostPort,b.ContainerPort),"-v","crakhost_data_"+id+":/data","--label","crakhost.managed=true","--label","crakhost.server="+id}
+    network:=ensureRuntimeNetwork(id,"")
+    args := []string{"run","-d","--name",container,"--restart","unless-stopped","--network",network,"--memory",fmt.Sprintf("%dm",b.MemoryMB),"--cpus",fmt.Sprintf("%.2f",b.CPU),"--dns",env("CRAKNODE_DNS_PRIMARY","1.1.1.1"),"--dns",env("CRAKNODE_DNS_SECONDARY","8.8.8.8"),"-p",fmt.Sprintf("%d:%d",b.HostPort,b.ContainerPort),"-v","crakhost_data_"+id+":/data","--label","crakhost.managed=true","--label","crakhost.server="+id}
     for k,v := range b.Env {
         if safeEnvKey.MatchString(k) && len(v) <= 512 { args=append(args,"-e",k+"="+v) }
     }
     args=append(args,b.Image)
     out,err:=docker(args...)
-    if err!=nil { jsonOut(w,502,map[string]string{"error":cleanErr(out,err)});return }
-    jsonOut(w,201,map[string]any{"ok":true,"container":container,"id":strings.TrimSpace(out)})
+    if err!=nil { cleanupRuntimeNetwork(id);jsonOut(w,502,map[string]string{"error":cleanErr(out,err)});return }
+    jsonOut(w,201,map[string]any{"ok":true,"container":container,"id":strings.TrimSpace(out),"network":network,"databaseHost":"postgres"})
 }
 
-func (a api) deleteServer(w http.ResponseWriter, container string) {
+func (a api) deleteServer(w http.ResponseWriter, id, container string) {
     out,err:=docker("rm","-f",container)
     if err!=nil {
-        if strings.Contains(strings.ToLower(out),"no such container") { jsonOut(w,200,map[string]any{"ok":true,"alreadyMissing":true});return }
+        if strings.Contains(strings.ToLower(out),"no such container") { cleanupRuntimeNetwork(id);jsonOut(w,200,map[string]any{"ok":true,"alreadyMissing":true});return }
         jsonOut(w,502,map[string]string{"error":cleanErr(out,err)});return
     }
+    cleanupRuntimeNetwork(id)
     jsonOut(w,200,map[string]any{"ok":true})
 }
 
-func (a api) action(w http.ResponseWriter, r *http.Request, container string) {
+func (a api) action(w http.ResponseWriter, r *http.Request, id, container string) {
     var b actionBody
     if json.NewDecoder(http.MaxBytesReader(w,r.Body,8<<10)).Decode(&b)!=nil { jsonOut(w,400,map[string]string{"error":"invalid request"});return }
-    var args []string
+    var out string;var err error
     switch b.Action {
-    case "start": args=[]string{"start",container}
-    case "stop": args=[]string{"stop","--time","15",container}
-    case "restart": args=[]string{"restart","--time","15",container}
-    case "kill": args=[]string{"kill",container}
+    case "start":
+        ensureRuntimeNetwork(id,container)
+        out,err=docker("start",container)
+        if err==nil { ensureRuntimeNetwork(id,container) }
+    case "stop": out,err=docker("stop","--time","15",container)
+    case "restart":
+        ensureRuntimeNetwork(id,container)
+        out,err=docker("restart","--time","15",container)
+        if err==nil { ensureRuntimeNetwork(id,container) }
+    case "kill": out,err=docker("kill",container)
     default: jsonOut(w,400,map[string]string{"error":"unsupported action"});return
     }
-    out,err:=docker(args...);if err!=nil { jsonOut(w,502,map[string]string{"error":cleanErr(out,err)});return }
-    jsonOut(w,200,map[string]any{"ok":true,"action":b.Action})
+    if err!=nil { jsonOut(w,502,map[string]string{"error":cleanErr(out,err)});return }
+    jsonOut(w,200,map[string]any{"ok":true,"action":b.Action,"network":serverNetwork(id)})
 }
 
 func (a api) command(w http.ResponseWriter, r *http.Request, container string) {
@@ -206,18 +263,29 @@ func (a api) command(w http.ResponseWriter, r *http.Request, container string) {
 }
 
 func (a api) status(w http.ResponseWriter, container string) {
-    state,err:=docker("inspect","-f","{{.State.Status}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",container)
-    if err!=nil { jsonOut(w,200,serverStatus{Status:"offline",Uptime:"-"});return }
-    p:=strings.Split(strings.TrimSpace(state),"|");status:=p[0];uptime:="-";health:="none"
-    if len(p)>2 { health=p[2] }
-    if len(p)>1 && status=="running" { if t,e:=time.Parse(time.RFC3339Nano,p[1]);e==nil { uptime=humanDuration(time.Since(t)) } }
+    tpl:="{{.State.Status}}\t{{.State.StartedAt}}\t{{.State.FinishedAt}}\t{{.State.ExitCode}}\t{{.State.OOMKilled}}\t{{.RestartCount}}\t{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}\t{{.Config.Image}}\t{{.Id}}"
+    state,err:=docker("inspect","-f",tpl,container)
+    if err!=nil { jsonOut(w,200,serverStatus{Status:"offline",Uptime:"-",Health:"none"});return }
+    p:=strings.Split(strings.TrimSpace(state),"\t");status:="unknown";uptime:="-";health:="none"
+    if len(p)>0 { status=p[0] }
+    startedAt:="";finishedAt:="";exitCode:=0;oomKilled:=false;restartCount:=0;image:="";containerID:=""
+    if len(p)>1 { startedAt=cleanDockerTime(p[1]) }
+    if len(p)>2 { finishedAt=cleanDockerTime(p[2]) }
+    if len(p)>3 { exitCode,_=strconv.Atoi(strings.TrimSpace(p[3])) }
+    if len(p)>4 { oomKilled,_=strconv.ParseBool(strings.TrimSpace(p[4])) }
+    if len(p)>5 { restartCount,_=strconv.Atoi(strings.TrimSpace(p[5])) }
+    if len(p)>6 { health=p[6] }
+    if len(p)>7 { image=p[7] }
+    if len(p)>8 { containerID=p[8] }
+    if status=="running"&&startedAt!="" { if t,e:=time.Parse(time.RFC3339Nano,startedAt);e==nil { uptime=humanDuration(time.Since(t)) } }
+    stateErrorRaw,_:=docker("inspect","-f","{{.State.Error}}",container)
     inspectLimit:=containerMemoryLimitMB(container)
-    s:=serverStatus{Status:status,MemoryLimit:inspectLimit,Uptime:uptime,Health:health}
+    s:=serverStatus{Status:status,MemoryLimit:inspectLimit,CPULimit:containerCPULimit(container),Uptime:uptime,Health:health,ExitCode:exitCode,OOMKilled:oomKilled,StateError:strings.TrimSpace(stateErrorRaw),RestartCount:restartCount,StartedAt:startedAt,FinishedAt:finishedAt,Image:image,ContainerID:containerID,RuntimeNetwork:containerNetworks(container)}
     if status=="running" {
         if raw,e:=docker("stats","--no-stream","--format","{{.CPUPerc}}|{{.MemUsage}}",container);e==nil {
             parseStats(raw,&s)
             if s.MemoryLimit<=0 { s.MemoryLimit=inspectLimit }
-            s.CPURaw=s.CPU;s.CPULimit=containerCPULimit(container)
+            s.CPURaw=s.CPU
             if s.CPULimit>0 { s.CPU=s.CPU/s.CPULimit }
             if s.CPU<0 { s.CPU=0 };if s.CPU>100 { s.CPU=100 }
         }
@@ -232,6 +300,11 @@ func (a api) logs(w http.ResponseWriter, container string) {
     jsonOut(w,200,map[string]any{"lines":lines,"available":true})
 }
 
+func containerNetworks(container string) string {
+    raw,err:=docker("inspect","-f","{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}",container)
+    if err!=nil{return ""};return strings.Join(strings.Fields(raw),", ")
+}
+func cleanDockerTime(v string) string { v=strings.TrimSpace(v);if v==""||strings.HasPrefix(v,"0001-"){return ""};return v }
 func containerCPULimit(container string) float64 {
     raw,err:=docker("inspect","-f","{{.HostConfig.NanoCpus}}|{{.HostConfig.CpuQuota}}|{{.HostConfig.CpuPeriod}}",container)
     if err!=nil{return 0};p:=strings.Split(strings.TrimSpace(raw),"|")
