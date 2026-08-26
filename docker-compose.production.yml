@@ -75,7 +75,12 @@ services:
       - |
         sleep 20
         while true; do
-          wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" "http://panel:4310/api/internal/status/sample?probe=1" || true
+          echo "[CrakHost Status] collecting minute sample..."
+          if result=$$(wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" "http://panel:4310/api/internal/status/sample?probe=1" 2>&1); then
+            echo "[CrakHost Status] $$result"
+          else
+            echo "[CrakHost Status] collector request failed: $$result" >&2
+          fi
           wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/alerts/dispatch || true
           sleep 60
         done
