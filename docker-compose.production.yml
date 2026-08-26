@@ -75,6 +75,7 @@ services:
       - |
         sleep 75
         while true; do
+          wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/status/sample || true
           wget -qO- --timeout=30 --header="x-crakhost-cron-secret: $${CRAKHOST_CRON_SECRET}" --post-data="" http://panel:4310/api/internal/alerts/dispatch || true
           sleep 60
         done
