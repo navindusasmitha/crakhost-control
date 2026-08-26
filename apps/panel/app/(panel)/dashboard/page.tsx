@@ -3,6 +3,7 @@ import {Server as ServerIcon,Plus,Cpu,MemoryStick,Wallet,TerminalSquare,Gamepad2
 import {db} from '@/lib/db';
 import {nodeFetchFor} from '@/lib/node';
 import {getCurrentUser,isStaff} from '@/lib/auth';
+import {reconcileProvisioningOrders} from '@/lib/provisioning-reconcile';
 
 export const dynamic='force-dynamic';
 export const revalidate=0;
@@ -11,6 +12,7 @@ export default async function Dashboard(){
   const user=await getCurrentUser();
   if(!user)return null;
   const staff=isStaff(user);
+  if(staff)await reconcileProvisioningOrders().catch(()=>null);
   const params:any[]=staff?[]:[user.id];
   const where=staff?'':'where s.owner_id=$1';
   const [serverQ,invoiceQ]=await Promise.all([
@@ -19,6 +21,8 @@ export default async function Dashboard(){
   ]);
   const servers=await Promise.all(serverQ.rows.map(async(s:any)=>{try{const live=await nodeFetchFor(s,`/v1/servers/${encodeURIComponent(s.identifier)}/status`);return{...s,status:String(live.status||s.status||'offline'),live}}catch{return{...s,status:'offline',live:null}}}));
   const running=servers.filter((s:any)=>s.status==='running').length;
+  const stopped=servers.filter((s:any)=>['offline','exited','created','dead'].includes(String(s.status||'').toLowerCase())).length;
+  const unhealthy=servers.filter((s:any)=>s.live?.health==='unhealthy'||s.live?.oomKilled||s.live?.stateError).length;
   const totalRam=servers.reduce((a:number,s:any)=>a+Number(s.memory_mb||0),0);
   const totalCpu=servers.reduce((a:number,s:any)=>a+Number(s.cpu_limit||0),0);
   const totalDisk=servers.reduce((a:number,s:any)=>a+Number(s.disk_mb||0),0);
@@ -32,11 +36,11 @@ export default async function Dashboard(){
     try{
       const [nodesQ,queueCountQ,ticketsQ,failedQ,settingsQ,queueQ]=await Promise.all([
         db.query(`select count(*)::int total,count(*) filter(where enabled and last_seen_at>=now()-interval '120 seconds')::int online from nodes`),
-        db.query(`select count(*)::int count from orders where status in ('PENDING','PAID','PROVISIONING')`),
+        db.query(`select count(*)::int count from orders where status in ('PAID','PROVISIONING')`),
         db.query(`select count(*)::int open,count(*) filter(where priority in ('HIGH','URGENT'))::int priority from support_tickets where status<>'CLOSED'`),
         db.query(`select count(*)::int count from orders where status='FAILED' and updated_at>=now()-interval '24 hours'`),
         db.query(`select value from system_settings where key='operations'`),
-        db.query(`select o.id,o.server_name,o.status,o.updated_at,u.name customer,p.name plan from orders o join users u on u.id=o.user_id left join plans p on p.id=o.plan_id where o.status in ('PENDING','PAID','PROVISIONING','FAILED') order by case o.status when 'PROVISIONING' then 0 when 'PAID' then 1 when 'PENDING' then 2 else 3 end,o.updated_at desc limit 6`)
+        db.query(`select o.id,o.server_name,o.status,o.updated_at,u.name customer,p.name plan from orders o join users u on u.id=o.user_id left join plans p on p.id=o.plan_id where o.status in ('PAID','PROVISIONING') order by case o.status when 'PROVISIONING' then 0 else 1 end,o.updated_at desc limit 6`)
       ]);
       const settings=settingsQ.rows[0]?.value||{};
       const drainNodes=Array.isArray(settings?.drainNodes)?new Set(settings.drainNodes.map((x:any)=>String(x))).size:0;
@@ -50,7 +54,7 @@ export default async function Dashboard(){
     <section className="dashboardHero"><div className="heroCopy"><div className="eyebrow">CONTROL OVERVIEW</div><h1>{staff?'Infrastructure':'Your hosting'} <span>at a glance</span></h1><p>{staff?'Production fleet, provisioning and incident signals in one view.':`${running} of ${servers.length} servers currently running with live CrakNode status checks.`}</p></div><div className="heroActions">{staff&&<Link href="/operations" className="btn"><Activity size={14}/>Operations</Link>}<Link href="/servers" className="btn"><ServerIcon size={14}/>Server fleet</Link><Link href="/checkout" className="btn indigo"><Plus size={14}/>Deploy server</Link></div></section>
 
     <section className="surfaceGrid">
-      <Metric icon={<ServerIcon size={15}/>} label="Servers" value={servers.length} hint={`${running} running`}/>
+      <Metric icon={<ServerIcon size={15}/>} label="Servers" value={servers.length} hint={`${running} running · ${stopped} stopped${unhealthy?` · ${unhealthy} unhealthy`:''}`}/>
       <Metric icon={<Cpu size={15}/>} label="Allocated CPU" value={`${trim(totalCpu)} vCPU`} hint="Purchased allocation"/>
       <Metric icon={<MemoryStick size={15}/>} label="Allocated RAM" value={`${gb(totalRam)} GB`} hint={`${gb(totalDisk)} GB disk`}/>
       <Metric icon={<Wallet size={15}/>} label={staff?'Paid this month':'Spend this month'} value={`${currency} ${spend.toLocaleString()}`} hint="Paid invoices only"/>
@@ -60,12 +64,12 @@ export default async function Dashboard(){
       {ops.error&&<div className="notice error panelSection"><TriangleAlert size={14}/><span><b>Overview operations metrics are temporarily unavailable.</b> The dashboard will remain usable; open Operations for live diagnostics.</span></div>}
       <section className="adminOverview panelSection">
         <Metric icon={<Boxes size={15}/>} label="Nodes online" value={ops.error?'—':`${Number(ops.nodes.online||0)}/${Number(ops.nodes.total||0)}`} hint={ops.error?'Operations API fallback':`${Number(ops.nodes.draining||0)} draining`}/>
-        <Metric icon={<PackageOpen size={15}/>} label="Provisioning queue" value={ops.error?'—':ops.queue} hint="Pending · paid · provisioning"/>
+        <Metric icon={<PackageOpen size={15}/>} label="Provisioning queue" value={ops.error?'—':ops.queue} hint="Paid · provisioning only"/>
         <Metric icon={<LifeBuoy size={15}/>} label="Open support" value={ops.error?'—':Number(ops.tickets.open||0)} hint={ops.error?'Metrics unavailable':`${Number(ops.tickets.priority||0)} high / urgent`}/>
         <Metric icon={<TriangleAlert size={15}/>} label="Failed · 24h" value={ops.error?'—':ops.failed24} hint="Provisioning failures"/>
       </section>
       {ops.settings?.maintenanceMode&&<div className="notice panelSection"><Wrench size={14}/><span><b>Maintenance mode enabled.</b> {ops.settings.maintenanceMessage||'Scheduled maintenance in progress.'}</span></div>}
-      <section className="twoCol panelSection"><div className="card adminSurface"><div className="panelSectionHead"><div><h2>Operations pulse</h2><p>Shortcuts for the production control plane.</p></div><span className="liveChip"><i/>ADMIN</span></div><div className="releaseBox"><div className="timelineRow"><span><b>Compute scheduling</b><small>Drain, resume and disable CrakNode capacity.</small></span><Link className="btn" href="/nodes">Nodes</Link></div><div className="timelineRow"><span><b>Platform incidents</b><small>Host health, priority tickets and provisioning failures.</small></span><Link className="btn" href="/operations">Operations</Link></div><div className="timelineRow"><span><b>Production releases</b><small>One-click update, VPS health and safe cleanup.</small></span><Link className="btn" href="/deployment">Deployment</Link></div></div></div><div className="card adminSurface"><div className="panelSectionHead"><div><h2>Provisioning queue</h2><p>Newest orders needing operational attention.</p></div><Link className="btn" href="/admin/orders">All orders</Link></div><div className="timelineList">{ops.queueRows.length?ops.queueRows.map((o:any)=><div className="timelineRow" key={o.id}><span><b>{o.server_name}</b><small>{o.customer} · {o.plan||'Custom plan'} · {ago(o.updated_at)}</small></span><span className={`statusDot ${statusClass(o.status)}`}>{String(o.status).toLowerCase()}</span></div>):<div className="emptyState">{ops.error?'Queue metrics unavailable.':'Provisioning queue is clear.'}</div>}</div></div></section>
+      <section className="twoCol panelSection"><div className="card adminSurface"><div className="panelSectionHead"><div><h2>Operations pulse</h2><p>Shortcuts for the production control plane.</p></div><span className="liveChip"><i/>ADMIN</span></div><div className="releaseBox"><div className="timelineRow"><span><b>Compute scheduling</b><small>Drain, resume and disable CrakNode capacity.</small></span><Link className="btn" href="/nodes">Nodes</Link></div><div className="timelineRow"><span><b>Platform incidents</b><small>Host health, priority tickets and provisioning failures.</small></span><Link className="btn" href="/operations">Operations</Link></div><div className="timelineRow"><span><b>Production releases</b><small>One-click update, VPS health and safe cleanup.</small></span><Link className="btn" href="/deployment">Deployment</Link></div></div></div><div className="card adminSurface"><div className="panelSectionHead"><div><h2>Provisioning queue</h2><p>Paid orders and active provisioning jobs that need operational attention.</p></div><Link className="btn" href="/admin/orders">All orders</Link></div><div className="timelineList">{ops.queueRows.length?ops.queueRows.map((o:any)=><div className="timelineRow" key={o.id}><span><b>{o.server_name}</b><small>{o.customer} · {o.plan||'Custom plan'} · {ago(o.updated_at)}</small></span><span className={`statusDot ${statusClass(o.status)}`}>{String(o.status).toLowerCase()}</span></div>):<div className="emptyState">{ops.error?'Queue metrics unavailable.':'Provisioning queue is clear.'}</div>}</div></div></section>
     </>}
 
     <section className="panelSection"><div className="panelSectionHead"><div><h2>Server fleet</h2><p>Runtime status and resource use reported by each assigned node.</p></div><span className="liveChip"><i/>LIVE DATA</span></div>{servers.length===0?<div className="nodeEmpty"><Gamepad2 size={28}/><h3>No servers yet</h3><p>Order a plan to provision the first workload.</p><Link href="/checkout" className="btn indigo">Order server</Link></div>:<div className="fleetList">{servers.map((s:any)=>{const cpu=Math.max(0,Math.min(100,Number(s.live?.cpu||0)));const mem=Number(s.live?.memory||0);const memPct=s.memory_mb?Math.max(0,Math.min(100,mem/Number(s.memory_mb)*100)):0;return <article className="fleetRow" key={s.id}><div className="fleetIdentity"><div className="fleetIcon"><Gamepad2 size={19}/></div><div><b>{s.name}</b><small>{s.primary_ip}:{s.primary_port} · {s.identifier}</small></div></div><div className="fleetCell"><span className={`statusDot ${statusClass(s.status)}`}>{s.status||'unknown'}</span><small>{s.node_name||'Unassigned node'}</small></div><div className="fleetUsage"><div className="fleetUsageLine"><span>CPU</span><b>{cpu.toFixed(1)}%</b></div><div className="fleetBar"><span style={{width:`${cpu}%`}}/></div><small>{trim(Number(s.cpu_limit||0))} vCPU limit</small></div><div className="fleetUsage"><div className="fleetUsageLine"><span>Memory</span><b>{Math.round(mem)} / {Number(s.memory_mb||0)} MB</b></div><div className="fleetBar"><span style={{width:`${memPct}%`}}/></div><small>{gb(Number(s.memory_mb||0))} GB allocation</small></div><Link className="btn" href={`/servers/${s.identifier}`}>Manage <ArrowUpRight size={13}/></Link></article>})}</div>}</section>
@@ -78,4 +82,4 @@ function Metric({icon,label,value,hint}:{icon:React.ReactNode;label:string;value
 function gb(mb:number){return Number.isFinite(mb)?Number((mb/1024).toFixed(1)).toString():'0'}
 function trim(v:number){return Number.isFinite(v)?Number(v.toFixed(2)).toString():'0'}
 function ago(value:any){const t=new Date(value).getTime();if(!Number.isFinite(t))return'unknown';const s=Math.max(0,Math.round((Date.now()-t)/1000));if(s<60)return`${s}s ago`;if(s<3600)return`${Math.floor(s/60)}m ago`;if(s<86400)return`${Math.floor(s/3600)}h ago`;return`${Math.floor(s/86400)}d ago`}
-function statusClass(v:any){const s=String(v||'unknown').toLowerCase();if(s==='failed')return'failed';if(['provisioning','paid','pending','starting'].includes(s))return'provisioning';if(['running','active','online'].includes(s))return'online';if(['offline','suspended'].includes(s))return s;return'unknown'}
+function statusClass(v:any){const s=String(v||'unknown').toLowerCase();if(s==='failed')return'failed';if(['provisioning','paid','pending','starting'].includes(s))return'provisioning';if(['running','active','online'].includes(s))return'online';if(['offline','suspended','exited','dead'].includes(s))return'offline';return'unknown'}
