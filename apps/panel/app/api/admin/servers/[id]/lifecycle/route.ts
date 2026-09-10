@@ -1,3 +1,38 @@
-import {NextRequest,NextResponse} from 'next/server';import {getCurrentUser,isStaff} from '@/lib/auth';import {db} from '@/lib/db';import {nodeFetchForServer} from '@/lib/node';import {audit} from '@/lib/audit';import {emitWebhookEvent} from '@/lib/webhooks';
+import {NextRequest,NextResponse} from 'next/server';
+import {getCurrentUser,isStaff} from '@/lib/auth';
+import {db} from '@/lib/db';
+import {nodeFetchForServer} from '@/lib/node';
+import {audit} from '@/lib/audit';
+import {emitWebhookEvent} from '@/lib/webhooks';
+
 const allowed=new Set(['suspend','unsuspend']);
-export async function POST(req:NextRequest,{params}:{params:Promise<{id:string}>}){const u=await getCurrentUser();if(!isStaff(u))return NextResponse.json({error:'Forbidden'},{status:403});const {id}=await params;const b=await req.json().catch(()=>({}));const action=String(b.action||'');if(!allowed.has(action))return NextResponse.json({error:'Unsupported action'},{status:400});const q=await db.query('select * from servers where identifier=$1 limit 1',[id]);const s=q.rows[0];if(!s)return NextResponse.json({error:'Server not found'},{status:404});if(action==='suspend'){if(s.suspended)return NextResponse.json({ok:true,already:true});try{await nodeFetchForServer(id,`/v1/servers/${encodeURIComponent(id)}/action`,{method:'POST',body:JSON.stringify({action:'stop'})})}catch(e:any){return NextResponse.json({error:`CrakNode refused suspend: ${e?.message||'node unavailable'}`},{status:503})}await db.query("update servers set suspended=true,suspended_at=now(),billing_status='SUSPENDED',status='offline',updated_at=now() where id=$1",[s.id]);await audit(u.id,'server.suspend','server',s.id,{});await emitWebhookEvent(s.owner_id,'server.suspended',{server:s.identifier,name:s.name}).catch(()=>null);return NextResponse.json({ok:true})}if(!s.suspended)return NextResponse.json({ok:true,already:true});try{await nodeFetchForServer(id,`/v1/servers/${encodeURIComponent(id)}/action`,{method:'POST',body:JSON.stringify({action:'start'})})}catch(e:any){return NextResponse.json({error:`CrakNode refused unsuspend: ${e?.message||'node unavailable'}`},{status:503})}await db.query("update servers set suspended=false,suspended_at=null,billing_status='ACTIVE',updated_at=now() where id=$1",[s.id]);await audit(u.id,'server.unsuspend','server',s.id,{});await emitWebhookEvent(s.owner_id,'server.unsuspended',{server:s.identifier,name:s.name}).catch(()=>null);return NextResponse.json({ok:true})}
+
+export async function POST(req:NextRequest,{params}:{params:Promise<{id:string}>}){
+  const u=await getCurrentUser();
+  if(!isStaff(u))return NextResponse.json({error:'Forbidden'},{status:403});
+  const {id}=await params;
+  const b=await req.json().catch(()=>({}));
+  const action=String(b.action||'');
+  if(!allowed.has(action))return NextResponse.json({error:'Unsupported action'},{status:400});
+  const q=await db.query('select * from servers where identifier=$1 limit 1',[id]);
+  const s=q.rows[0];
+  if(!s)return NextResponse.json({error:'Server not found'},{status:404});
+
+  if(action==='suspend'){
+    if(s.suspended)return NextResponse.json({ok:true,already:true});
+    try{await nodeFetchForServer(id,`/v1/servers/${encodeURIComponent(id)}/action`,{method:'POST',body:JSON.stringify({action:'stop'})})}
+    catch(e:any){return NextResponse.json({error:`CrakNode refused suspend: ${e?.message||'node unavailable'}`},{status:503})}
+    await db.query("update servers set suspended=true,suspended_at=now(),billing_status='SUSPENDED',status='offline',desired_state='stopped',recovery_suppressed_until=null,updated_at=now() where id=$1",[s.id]);
+    await audit(u.id,'server.suspend','server',s.id,{});
+    await emitWebhookEvent(s.owner_id,'server.suspended',{server:s.identifier,name:s.name}).catch(()=>null);
+    return NextResponse.json({ok:true,desiredState:'stopped'});
+  }
+
+  if(!s.suspended)return NextResponse.json({ok:true,already:true});
+  try{await nodeFetchForServer(id,`/v1/servers/${encodeURIComponent(id)}/action`,{method:'POST',body:JSON.stringify({action:'start'})})}
+  catch(e:any){return NextResponse.json({error:`CrakNode refused unsuspend: ${e?.message||'node unavailable'}`},{status:503})}
+  await db.query("update servers set suspended=false,suspended_at=null,billing_status='ACTIVE',desired_state='running',recovery_failures=0,recovery_suppressed_until=null,updated_at=now() where id=$1",[s.id]);
+  await audit(u.id,'server.unsuspend','server',s.id,{});
+  await emitWebhookEvent(s.owner_id,'server.unsuspended',{server:s.identifier,name:s.name}).catch(()=>null);
+  return NextResponse.json({ok:true,desiredState:'running'});
+}
