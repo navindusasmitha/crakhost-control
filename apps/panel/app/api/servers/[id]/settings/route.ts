@@ -1,5 +1,46 @@
-import{NextRequest,NextResponse}from'next/server';import{requireServer,apiError}from'@/lib/server-access';import{db}from'@/lib/db';import{nodeFetchForServer}from'@/lib/node';import{audit}from'@/lib/audit';
+import {NextRequest,NextResponse} from 'next/server';
+import {requireServer,apiError} from '@/lib/server-access';
+import {db} from '@/lib/db';
+import {nodeFetchForServer} from '@/lib/node';
+import {audit} from '@/lib/audit';
+
 export const dynamic='force-dynamic';
-export async function GET(_:NextRequest,{params}:{params:Promise<{id:string}>}){try{const{id}=await params;const{server}=await requireServer(id,'settings');return NextResponse.json({server:{name:server.name,description:server.description,memoryMb:server.memory_mb,cpu:server.cpu_limit,diskMb:server.disk_mb,suspended:server.suspended}},{headers:{'cache-control':'no-store'}})}catch(e:any){const x=apiError(e);return NextResponse.json({error:x.error},{status:x.status})}}
-export async function PATCH(req:NextRequest,{params}:{params:Promise<{id:string}>}){try{const{id}=await params;const{server,user}=await requireServer(id,'settings');const b=await req.json().catch(()=>({}));const name=String(b.name??server.name).trim().slice(0,120);if(!name)return NextResponse.json({error:'Server name is required'},{status:400});const description=String(b.description??server.description??'').trim().slice(0,255);await db.query('update servers set name=$2,description=$3,updated_at=now() where id=$1',[server.id,name,description]);await audit(user.id,'server.update','server',server.id,{name});return NextResponse.json({ok:true,name,description})}catch(e:any){const x=apiError(e);return NextResponse.json({error:x.error},{status:x.status})}}
-export async function DELETE(req:NextRequest,{params}:{params:Promise<{id:string}>}){try{const{id}=await params;const{server,user}=await requireServer(id,'settings');if(server.owner_id!==user.id&&user.role!=='ADMIN')return NextResponse.json({error:'Only owner/admin can delete server'},{status:403});const confirm=req.headers.get('x-crakhost-delete-confirm');if(confirm!==id)return NextResponse.json({error:'Deletion confirmation does not match server identifier'},{status:400});try{await nodeFetchForServer(id,`/v1/servers/${encodeURIComponent(id)}/delete`,{method:'POST',body:'{}'})}catch(e:any){return NextResponse.json({error:`CrakNode refused deletion: ${e?.message||'node unavailable'}`},{status:503})}await db.query('BEGIN');try{await db.query('delete from allocations where server_id=$1',[server.id]);await db.query('delete from servers where id=$1',[server.id]);await db.query('COMMIT')}catch(e){await db.query('ROLLBACK').catch(()=>{});throw e}await audit(user.id,'server.delete','server',server.id,{identifier:id});return NextResponse.json({ok:true})}catch(e:any){const x=apiError(e);return NextResponse.json({error:x.error},{status:x.status})}}
+
+export async function GET(_:NextRequest,{params}:{params:Promise<{id:string}>}){
+  try{
+    const {id}=await params;const {server}=await requireServer(id,'settings');
+    return NextResponse.json({server:{
+      name:server.name,description:server.description,memoryMb:server.memory_mb,cpu:server.cpu_limit,diskMb:server.disk_mb,suspended:server.suspended,
+      desiredState:server.desired_state||'stopped',recoveryEnabled:server.recovery_enabled!==false,lastRecoveryAt:server.last_recovery_at||null,
+      recoveryFailures:Number(server.recovery_failures||0),recoverySuppressedUntil:server.recovery_suppressed_until||null,
+    }},{headers:{'cache-control':'no-store'}});
+  }catch(e:any){const x=apiError(e);return NextResponse.json({error:x.error},{status:x.status})}
+}
+
+export async function PATCH(req:NextRequest,{params}:{params:Promise<{id:string}>}){
+  try{
+    const {id}=await params;const {server,user}=await requireServer(id,'settings');const b=await req.json().catch(()=>({}));
+    const name=String(b.name??server.name).trim().slice(0,120);if(!name)return NextResponse.json({error:'Server name is required'},{status:400});
+    const description=String(b.description??server.description??'').trim().slice(0,255);
+    const recoveryEnabled=typeof b.recoveryEnabled==='boolean'?b.recoveryEnabled:server.recovery_enabled!==false;
+    await db.query(`update servers set name=$2,description=$3,recovery_enabled=$4,
+      recovery_suppressed_until=case when $4 then null else recovery_suppressed_until end,
+      updated_at=now() where id=$1`,[server.id,name,description,recoveryEnabled]);
+    await audit(user.id,'server.update','server',server.id,{name,recoveryEnabled});
+    return NextResponse.json({ok:true,name,description,recoveryEnabled});
+  }catch(e:any){const x=apiError(e);return NextResponse.json({error:x.error},{status:x.status})}
+}
+
+export async function DELETE(req:NextRequest,{params}:{params:Promise<{id:string}>}){
+  try{
+    const {id}=await params;const {server,user}=await requireServer(id,'settings');
+    if(server.owner_id!==user.id&&user.role!=='ADMIN')return NextResponse.json({error:'Only owner/admin can delete server'},{status:403});
+    const confirm=req.headers.get('x-crakhost-delete-confirm');if(confirm!==id)return NextResponse.json({error:'Deletion confirmation does not match server identifier'},{status:400});
+    try{await nodeFetchForServer(id,`/v1/servers/${encodeURIComponent(id)}/delete`,{method:'POST',body:'{}'})}
+    catch(e:any){return NextResponse.json({error:`CrakNode refused deletion: ${e?.message||'node unavailable'}`},{status:503})}
+    await db.query('BEGIN');
+    try{await db.query('delete from allocations where server_id=$1',[server.id]);await db.query('delete from servers where id=$1',[server.id]);await db.query('COMMIT')}
+    catch(e){await db.query('ROLLBACK').catch(()=>{});throw e}
+    await audit(user.id,'server.delete','server',server.id,{identifier:id});return NextResponse.json({ok:true});
+  }catch(e:any){const x=apiError(e);return NextResponse.json({error:x.error},{status:x.status})}
+}

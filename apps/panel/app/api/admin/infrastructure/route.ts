@@ -1,8 +1,8 @@
 import{NextResponse}from'next/server';
 import{getCurrentUser,isStaff}from'@/lib/auth';
 import{db}from'@/lib/db';
-import{nodeFetchFor}from'@/lib/node';
-import{nodeDiskPolicy}from'@/lib/node-capacity';
+import{checkNodeRuntimeCapacity,nodeDiskPolicy}from'@/lib/node-capacity';
+import{scoreNodeForRequest}from'@/lib/node-scheduler';
 
 export const dynamic='force-dynamic';
 
@@ -20,20 +20,20 @@ export async function GET(){
   let health=!x.enabled?'DISABLED':age<=90000?'ONLINE':age<=180000?'DEGRADED':'OFFLINE';
   const cpuTotal=Number(x.capacity_cpu)||0,memTotal=Number(x.capacity_memory_mb)||0,diskTotal=Number(x.capacity_disk_mb)||0;
   const cpuUsed=Number(x.used_cpu)||0,memUsed=Number(x.used_memory_mb)||0,diskUsed=Number(x.used_disk_mb)||0;
-  let runtime:any=null;
+  const draining=drains.has(String(x.id));
+  let runtime:any=null,scheduler:any={schedulable:false,score:null,reason:health==='OFFLINE'?'Heartbeat offline':health==='DISABLED'?'Node disabled':draining?'Node draining':'Runtime not checked'};
   if(x.enabled&&age<=180000){
    try{
-    const d=await nodeFetchFor(x,'/diagnostics');
-    const totalBytes=Number(d.diskTotalBytes),freeBytes=Number(d.diskFreeBytes);
-    const totalMb=Number.isFinite(totalBytes)&&totalBytes>0?totalBytes/1024/1024:null;
-    const freeMb=Number.isFinite(freeBytes)&&freeBytes>=0?freeBytes/1024/1024:null;
-    const reserveMb=totalMb==null?null:Math.max(policy.reserveMb,totalMb*(policy.minFreePercent/100));
-    runtime={status:'online',version:d.version||x.agent_version||'',dockerVersion:d.dockerVersion||'',pressureLevel:String(d.pressureLevel||'unknown'),hostCpus:Number.isFinite(Number(d.hostCpus))?Number(d.hostCpus):null,load1:Number.isFinite(Number(d.load1))?Number(d.load1):null,memoryUsedPct:Number.isFinite(Number(d.memoryUsedPct))?Number(d.memoryUsedPct):null,diskPath:d.diskPath||'',diskTotalMb:totalMb,diskFreeMb:freeMb,diskReserveMb:reserveMb,safeDiskAvailableMb:freeMb==null||reserveMb==null?null:Math.max(0,freeMb-reserveMb),managedContainers:Number(d.managedContainers)||0,runningContainers:Number(d.runningContainers)||0};
-    if(runtime.pressureLevel==='critical')health='DEGRADED';
-   }catch(e:any){runtime={status:'offline',error:String(e?.message||'Node diagnostics failed').slice(0,180)};if(health==='ONLINE')health='DEGRADED'}
+    const check=await checkNodeRuntimeCapacity(x,0);const d=check.diagnostics||{};
+    const totalMb=check.totalDiskMb,freeMb=check.freeDiskMb,reserveMb=check.requiredReserveMb;
+    runtime={status:'online',version:d.version||x.agent_version||'',dockerVersion:d.dockerVersion||'',pressureLevel:String(d.pressureLevel||check.pressureLevel||'unknown'),hostCpus:Number.isFinite(Number(d.hostCpus))?Number(d.hostCpus):null,load1:Number.isFinite(Number(d.load1))?Number(d.load1):null,memoryUsedPct:Number.isFinite(Number(d.memoryUsedPct))?Number(d.memoryUsedPct):null,diskPath:d.diskPath||'',diskTotalMb:totalMb,diskFreeMb:freeMb,diskReserveMb:reserveMb,safeDiskAvailableMb:freeMb==null||reserveMb==null?null:Math.max(0,freeMb-reserveMb),managedContainers:Number(d.managedContainers)||0,runningContainers:Number(d.runningContainers)||0};
+    const assessment=scoreNodeForRequest({id:x.id,name:x.name,capacity_memory_mb:memTotal,capacity_disk_mb:diskTotal,capacity_cpu:cpuTotal,used_memory:memUsed,used_disk:diskUsed,used_cpu:cpuUsed},{memoryMb:0,cpu:0,diskMb:0},check);
+    scheduler={schedulable:check.ok&&!draining&&health!=='OFFLINE'&&health!=='DISABLED',score:assessment.score,pressureLevel:assessment.pressureLevel,projected:assessment.projected,reason:check.ok?(draining?'Node draining':'Ready for weighted placement'):check.reason};
+    if(!check.ok||runtime.pressureLevel==='critical')health='DEGRADED';
+   }catch(e:any){runtime={status:'offline',error:String(e?.message||'Node diagnostics failed').slice(0,180)};scheduler={schedulable:false,score:null,reason:'Runtime diagnostics unavailable'};if(health==='ONLINE')health='DEGRADED'}
   }
   const{api_token:_,base_url:__,...safe}=x;
-  return{...safe,draining:drains.has(String(x.id)),health,online:health==='ONLINE',heartbeat_age_seconds:Number.isFinite(age)?Math.max(0,Math.floor(age/1000)):null,utilization:{cpuPct:cpuTotal?Math.min(100,Math.round(cpuUsed/cpuTotal*1000)/10):0,memoryPct:memTotal?Math.min(100,Math.round(memUsed/memTotal*1000)/10):0,diskPct:diskTotal?Math.min(100,Math.round(diskUsed/diskTotal*1000)/10):0},free_cpu:Math.max(0,cpuTotal-cpuUsed),free_memory_mb:Math.max(0,memTotal-memUsed),free_disk_mb:Math.max(0,diskTotal-diskUsed),runtime};
+  return{...safe,draining,health,online:health==='ONLINE',heartbeat_age_seconds:Number.isFinite(age)?Math.max(0,Math.floor(age/1000)):null,utilization:{cpuPct:cpuTotal?Math.min(100,Math.round(cpuUsed/cpuTotal*1000)/10):0,memoryPct:memTotal?Math.min(100,Math.round(memUsed/memTotal*1000)/10):0,diskPct:diskTotal?Math.min(100,Math.round(diskUsed/diskTotal*1000)/10):0},free_cpu:Math.max(0,cpuTotal-cpuUsed),free_memory_mb:Math.max(0,memTotal-memUsed),free_disk_mb:Math.max(0,diskTotal-diskUsed),runtime,scheduler};
  }));
- return NextResponse.json({nodes,dbHosts:h.rows,migrations:m.rows,operations:ops,provisioningPolicy:policy,summary:{nodes:nodes.length,online:nodes.filter((x:any)=>x.health==='ONLINE').length,degraded:nodes.filter((x:any)=>x.health==='DEGRADED').length,offline:nodes.filter((x:any)=>x.health==='OFFLINE').length,disabled:nodes.filter((x:any)=>x.health==='DISABLED').length,draining:nodes.filter((x:any)=>x.draining).length,servers:nodes.reduce((a:number,x:any)=>a+Number(x.server_count||0),0),memoryUsedMb:nodes.reduce((a:number,x:any)=>a+Number(x.used_memory_mb||0),0),memoryTotalMb:nodes.reduce((a:number,x:any)=>a+Number(x.capacity_memory_mb||0),0)}},{headers:{'cache-control':'no-store'}});
+ return NextResponse.json({nodes,dbHosts:h.rows,migrations:m.rows,operations:ops,provisioningPolicy:policy,scheduler:{mode:'weighted-v1',description:'Scores safe nodes by projected CPU, RAM, allocated disk, backing disk and live host pressure.'},summary:{nodes:nodes.length,online:nodes.filter((x:any)=>x.health==='ONLINE').length,degraded:nodes.filter((x:any)=>x.health==='DEGRADED').length,offline:nodes.filter((x:any)=>x.health==='OFFLINE').length,disabled:nodes.filter((x:any)=>x.health==='DISABLED').length,draining:nodes.filter((x:any)=>x.draining).length,schedulable:nodes.filter((x:any)=>x.scheduler?.schedulable).length,servers:nodes.reduce((a:number,x:any)=>a+Number(x.server_count||0),0),memoryUsedMb:nodes.reduce((a:number,x:any)=>a+Number(x.used_memory_mb||0),0),memoryTotalMb:nodes.reduce((a:number,x:any)=>a+Number(x.capacity_memory_mb||0),0)}},{headers:{'cache-control':'no-store'}});
 }
