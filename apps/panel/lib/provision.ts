@@ -3,6 +3,7 @@ import {audit} from './audit';
 import {db} from './db';
 import {nodeFetchFor} from './node';
 import {checkNodeRuntimeCapacity} from './node-capacity';
+import {scoreNodeForRequest} from './node-scheduler';
 
 type ProvisionInput={
   ownerId:string;
@@ -76,9 +77,7 @@ async function candidateNodes(nodeId:string|null|undefined,location:string|null|
     having n.capacity_memory_mb-coalesce(sum(s.memory_mb) filter(where s.status<>'deleted'),0) >= $1
        and n.capacity_disk_mb-coalesce(sum(s.disk_mb) filter(where s.status<>'deleted'),0) >= $2
        and n.capacity_cpu-coalesce(sum(s.cpu_limit) filter(where s.status<>'deleted'),0) >= $3
-    order by (
-      n.capacity_memory_mb-coalesce(sum(s.memory_mb) filter(where s.status<>'deleted'),0)
-    ) desc,n.created_at asc
+    order by n.created_at asc
   `,params);
 
   return q.rows.filter((x:any)=>!drained.has(String(x.id))) as NodeCandidate[];
@@ -86,15 +85,19 @@ async function candidateNodes(nodeId:string|null|undefined,location:string|null|
 
 async function chooseNode(nodeId:string|null|undefined,location:string|null|undefined,memory:number,cpu:number,disk:number){
   const nodes=await candidateNodes(nodeId,location,memory,cpu,disk);
-  if(!nodes.length)return {node:null as NodeCandidate|null,reasons:[] as string[]};
+  if(!nodes.length)return {node:null as NodeCandidate|null,reasons:[] as string[],check:null as any,score:null as number|null,ranking:[] as any[]};
 
-  const reasons:string[]=[];
-  for(const node of nodes){
+  const evaluated=await Promise.all(nodes.map(async node=>{
     const check=await checkNodeRuntimeCapacity(node,disk);
-    if(check.ok)return {node,reasons,check};
-    reasons.push(`${node.name}: ${check.reason}`);
-  }
-  return {node:null as NodeCandidate|null,reasons,check:null};
+    const assessment=scoreNodeForRequest(node,{memoryMb:memory,cpu,diskMb:disk},check);
+    return {node,check,assessment};
+  }));
+  const eligible=evaluated.filter(x=>x.check.ok&&x.assessment.schedulable).sort((a,b)=>b.assessment.score-a.assessment.score||a.node.name.localeCompare(b.node.name));
+  const reasons=evaluated.filter(x=>!x.check.ok).map(x=>`${x.node.name}: ${x.check.reason}`);
+  const ranking=eligible.slice(0,3).map((x,index)=>({rank:index+1,id:x.node.id,name:x.node.name,location:x.node.location,score:x.assessment.score,pressureLevel:x.assessment.pressureLevel,projected:x.assessment.projected}));
+  const best=eligible[0];
+  if(!best)return {node:null as NodeCandidate|null,reasons,check:null as any,score:null as number|null,ranking};
+  return {node:best.node,reasons,check:best.check,score:best.assessment.score,ranking};
 }
 
 async function choosePort(client:any,nodeId:string,preferred?:number|null){
@@ -144,6 +147,7 @@ export async function preflightProvisioning(i:ProvisionPreflightInput){
   return {
     template:{slug:t.slug,image:t.image,internalPort:Number(t.internal_port)},
     node:{id:selected.node.id,name:selected.node.name,location:selected.node.location},
+    scheduler:{mode:'weighted-v1',score:selected.score,ranking:selected.ranking},
     backingStorage:{
       freeMb:selected.check?.freeDiskMb??null,
       projectedFreeMb:selected.check?.projectedFreeDiskMb??null,
@@ -205,8 +209,8 @@ async function reserveServer(node:NodeCandidate,i:ProvisionInput,t:any){
     const {rows}=await client.query(`
       insert into servers(
         owner_id,node_id,plan_id,name,identifier,container_name,image,cpu_limit,memory_mb,disk_mb,
-        primary_ip,primary_port,status,billing_status,next_due_at
-      ) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'0.0.0.0',$11,'installing','ACTIVE',now()+interval '30 days')
+        primary_ip,primary_port,status,billing_status,next_due_at,desired_state,recovery_enabled
+      ) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'0.0.0.0',$11,'installing','ACTIVE',now()+interval '30 days','running',true)
       returning *
     `,[i.ownerId,node.id,i.planId||null,i.name,identifier,container,t.image,i.cpu,i.memoryMb,i.diskMb,port]);
     const server=rows[0];
@@ -283,7 +287,7 @@ async function cleanupFailedProvision(node:NodeCandidate,server:any,reason:strin
 
   if(remoteClean){
     await db.query('delete from allocations where server_id=$1',[server.id]).catch(()=>{});
-    await db.query("update servers set status='deleted',updated_at=now() where id=$1",[server.id]).catch(()=>{});
+    await db.query("update servers set status='deleted',desired_state='stopped',updated_at=now() where id=$1",[server.id]).catch(()=>{});
     await db.query("insert into service_events(server_id,type,detail) values($1,'provision.failed',$2)",[server.id,`${reason} · runtime cleanup completed`]).catch(()=>{});
   }else{
     await db.query("update servers set status='error',updated_at=now() where id=$1",[server.id]).catch(()=>{});
@@ -299,6 +303,7 @@ export async function provisionServer(i:ProvisionInput){
   let node:NodeCandidate;
   let server:any;
   let resumed=false;
+  let schedulerScore:number|null=null;
 
   if(existing){
     node=existing.node;server=existing.server;resumed=true;
@@ -307,19 +312,21 @@ export async function provisionServer(i:ProvisionInput){
     const selected=await chooseNode(i.nodeId,i.location,i.memoryMb,i.cpu,i.diskMb);
     if(!selected.node)throw new Error(capacityError(i,selected.reasons));
     node=selected.node;
+    schedulerScore=selected.score;
     server=await reserveServer(node,i,t);
+    await db.query("insert into service_events(server_id,type,detail) values($1,'provision.scheduler_selected',$2)",[server.id,`Weighted scheduler selected ${node.name} with score ${schedulerScore??'-'}/100`]).catch(()=>{});
   }
 
   try{
     const runtime=await ensureRuntime(node,server,i,t);
-    await db.query("update servers set status='running',updated_at=now() where id=$1",[server.id]);
+    await db.query("update servers set status='running',desired_state='running',recovery_failures=0,recovery_suppressed_until=null,updated_at=now() where id=$1",[server.id]);
     await db.query("insert into service_events(server_id,type,detail) values($1,'provision.ready',$2)",[server.id,`${resumed?'Resumed and verified':'Runtime verified'} ${String(runtime?.status||'running')} on ${node.name}${node.location?` (${node.location})`:''}`]);
-    await audit(i.ownerId,'server.provision.success','server',server.id,{identifier:server.identifier,nodeId:node.id,node:node.name,port:server.primary_port,resumed}).catch(()=>{});
-    return {...server,status:'running',node_name:node.name,node_location:node.location,runtime};
+    await audit(i.ownerId,'server.provision.success','server',server.id,{identifier:server.identifier,nodeId:node.id,node:node.name,port:server.primary_port,resumed,schedulerScore}).catch(()=>{});
+    return {...server,status:'running',desired_state:'running',node_name:node.name,node_location:node.location,runtime,schedulerScore};
   }catch(e:any){
     const msg=String(e?.message||e).slice(0,500);
     const cleanup=await cleanupFailedProvision(node,server,msg);
-    await audit(i.ownerId,'server.provision.failed','server',server.id,{identifier:server.identifier,nodeId:node.id,node:node.name,error:msg,cleanup:cleanup.remoteClean?'complete':'required',resumed}).catch(()=>{});
+    await audit(i.ownerId,'server.provision.failed','server',server.id,{identifier:server.identifier,nodeId:node.id,node:node.name,error:msg,cleanup:cleanup.remoteClean?'complete':'required',resumed,schedulerScore}).catch(()=>{});
     if(!cleanup.remoteClean){
       throw new Error(`Docker provisioning failed on ${node.name}: ${msg}. Runtime cleanup also failed; allocation is retained for safety and administrator cleanup is required.`);
     }
